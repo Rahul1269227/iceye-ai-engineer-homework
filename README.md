@@ -15,6 +15,8 @@ uv sync
 
 That is the only setup step. uv installs Python 3.12 if it is missing, then the exact versions pinned in `pyproject.toml` and `uv.lock`. On Linux, torch comes from the PyTorch CPU index, which avoids about 2 GB of CUDA wheels.
 
+On macOS, the first command after a fresh `uv sync` can take a minute or two. In testing, that run used about 6 seconds of CPU and spent the rest waiting, most likely on the OS checking the newly installed native libraries; later runs start normally.
+
 The first `ner-chat extract` downloads about 670 MB of NER weights from Hugging Face (`knowledgator/gliner-bi-edge-v2.0` and its label encoder). For images and scans it also downloads Kreuzberg's PaddleOCR models. Both are cached. `ner-chat ask`, Part 2 and the tests download nothing.
 
 ## Quick start
