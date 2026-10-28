@@ -1,0 +1,13 @@
+{
+  "source": "fixture",
+  "model": "knowledgator/gliner-bi-edge-v2.0",
+  "labels": ["person", "organization", "location", "date", "product"],
+  "entities": [
+    {"name": "ICEYE", "label": "organization", "count": 7, "aliases": ["Iceye Oy"]},
+    {"name": "SAR", "label": "product", "count": 5, "aliases": ["synthetic aperture radar"]},
+    {"name": "Finland", "label": "location", "count": 4},
+    {"name": "Espoo", "label": "location", "count": 3},
+    {"name": "Rafal Modrzewski", "label": "person", "count": 2},
+    {"name": "2018", "label": "date", "count": 1}
+  ]
+}
