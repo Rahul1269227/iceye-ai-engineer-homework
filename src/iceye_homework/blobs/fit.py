@@ -38,7 +38,7 @@ import cv2
 import numpy as np
 from scipy.optimize import minimize
 
-from .geometry import BlobScorer, Raster, RotatedBox
+from .geometry import BlobScorer, Objective, Raster, RotatedBox, objective_rasters
 
 DECIMALS = 4
 
@@ -90,21 +90,15 @@ class _Blob:
 
     @classmethod
     def from_pixels(
-        cls, xs: np.ndarray, ys: np.ndarray, raster: Raster, shape: tuple[int, int] | None
+        cls, xs: np.ndarray, ys: np.ndarray, objective: Objective, shape: tuple[int, int] | None
     ) -> _Blob:
         ax, ay = float(np.round(xs.mean())), float(np.round(ys.mean()))
-        match raster:
-            case "opencv":
-                # fillPoly paints every pixel the outline touches: ~half a pixel per side.
-                grow = 1.0
-            case "center":
-                grow = 0.0
-            case _:
-                assert_never(raster)
-        return cls(xs - ax, ys - ay, ax, ay, BlobScorer(xs, ys, raster, shape), grow)
+        rasters = objective_rasters(objective)
+        grow = sum(_paint_growth(raster) for raster in rasters) / len(rasters)
+        return cls(xs - ax, ys - ay, ax, ay, BlobScorer(xs, ys, objective, shape), grow)
 
     def tie_score(self, params: Params) -> float:
-        """Smooth IoU of the region the raster model paints, for breaking exact-IoU ties."""
+        """Smooth IoU of the region the raster models paint, for breaking exact-IoU ties."""
         cx, cy, w, h, angle = params
         g = self.tie_grow
         return _soft_iou_params((cx, cy, abs(w) + g, abs(h) + g, angle), self.dx, self.dy)
@@ -130,6 +124,18 @@ class _Blob:
         return _soft_iou_params(_box_params(box), self.dx, self.dy)
 
 
+def _paint_growth(raster: Raster) -> float:
+    """How much wider and taller than the box the painted region is, roughly."""
+    match raster:
+        case "center":
+            return 0.0
+        case "subpixel" | "round" | "truncate":
+            # fillPoly paints every pixel the outline touches: ~half a pixel per side.
+            return 1.0
+        case _:
+            assert_never(raster)
+
+
 def label_blobs(mask: np.ndarray, connectivity: int = 8) -> tuple[int, np.ndarray, np.ndarray]:
     """Connected components of a boolean mask: ``(count, labels, stats)`` as in OpenCV."""
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -142,7 +148,7 @@ def fit_blob_boxes(
     mask: np.ndarray,
     connectivity: int = 8,
     min_area: int = 1,
-    raster: Raster = "opencv",
+    objective: Objective = "robust",
     workers: int = 1,
 ) -> list[BlobFit]:
     """Fit one IoU-maximising rotated box per connected component of ``mask``.
@@ -166,7 +172,7 @@ def fit_blob_boxes(
         areas.append(area)
 
     xs_all, ys_all = [xs for xs, _ in pixels], [ys for _, ys in pixels]
-    args = (xs_all, ys_all, repeat(raster), repeat(mask.shape))
+    args = (xs_all, ys_all, repeat(objective), repeat(mask.shape))
     # Process start-up costs more than fitting a handful of blobs.
     if workers > 1 and len(pixels) >= 4 * workers:
         with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -185,7 +191,7 @@ def fit_blob_boxes(
 def fit_blob(
     xs: np.ndarray,
     ys: np.ndarray,
-    raster: Raster = "opencv",
+    objective: Objective = "robust",
     shape: tuple[int, int] | None = None,
 ) -> tuple[RotatedBox, float, float]:
     """Best rotated box for one blob given its integer pixel centres ``(xs, ys)``.
@@ -194,7 +200,7 @@ def fit_blob(
     as returned (through the outer pixel centres) and grown by one pixel (to the outer
     pixel edges).
     """
-    blob = _Blob.from_pixels(xs, ys, raster, shape)
+    blob = _Blob.from_pixels(xs, ys, objective, shape)
 
     tight = _min_area_rect(blob.dx, blob.dy)
     enclosing = _inset(tight, -0.5)
@@ -205,9 +211,9 @@ def fit_blob(
     candidates = list(seeds)
     by_soft = sorted(seeds, key=blob.soft_iou, reverse=True)
     candidates += [_refine(box, blob.dx, blob.dy) for box in by_soft[:_REFINE_TOP_K]]
-    if blob.tie_grow:
-        # Area-optimal boxes, inset by however far the raster model paints beyond them.
-        candidates += [_inset(box, blob.tie_grow / 2.0) for box in candidates]
+    # Area-optimal boxes, inset by however far each raster model paints beyond them.
+    insets = {_paint_growth(raster) / 2.0 for raster in objective_rasters(objective)} - {0.0}
+    candidates += [_inset(box, margin) for margin in sorted(insets) for box in candidates]
 
     ranked = sorted(
         candidates,

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from .fit import fit_blob_boxes
-from .geometry import RASTERS
+from .geometry import OBJECTIVES
 from .io import load_mask, write_csv, write_overlay
 
 
@@ -29,11 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--threshold", type=int, default=127, help="foreground is gray > threshold (images only)"
     )
     parser.add_argument(
-        "--raster",
-        choices=RASTERS,
-        default="opencv",
-        help="how a box becomes a pixel mask for IoU: 'opencv' = cv2.fillPoly of "
-        "cv2.boxPoints, 'center' = pixel centres inside the box",
+        "--objective",
+        choices=OBJECTIVES,
+        default="robust",
+        help="how a box becomes a pixel mask for IoU: 'center' = pixel centres inside the "
+        "box; cv2.fillPoly of cv2.boxPoints with corners at 1/16 px ('subpixel'), rounded "
+        "('round') or truncated ('truncate', like np.intp); 'robust' (default) = mean IoU "
+        "over all four",
     )
     parser.add_argument("--connectivity", type=int, choices=(4, 8), default=8)
     parser.add_argument("--min-area", type=int, default=1, help="ignore blobs smaller than this")
@@ -59,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         mask,
         connectivity=args.connectivity,
         min_area=args.min_area,
-        raster=args.raster,
+        objective=args.objective,
         workers=args.workers,
     )
     elapsed = time.perf_counter() - start
