@@ -1,0 +1,54 @@
+[project]
+name = "iceye-ai-engineer-homework"
+version = "0.1.0"
+description = "ICEYE AI Engineer homework: grounded NER chatbot (Kreuzberg + GLinker + Pydantic AI) and IoU-maximising rotated blob boxes."
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "glinker==0.1.1",
+    "gliner==0.2.29",
+    "kreuzberg==4.10.4",
+    "numpy==2.5.4",
+    "opencv-python-headless==5.0.0.93",
+    "pydantic==2.14.1",
+    "pydantic-ai-slim[openai,anthropic]==2.63.0",
+    "scipy==1.18.1",
+    "torch==2.14.1",
+]
+
+[project.scripts]
+ner-chat = "iceye_homework.ner.cli:main"
+blob-boxes = "iceye_homework.blobs.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+    "ruff==0.17.3",
+]
+
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/iceye_homework"]
+
+# CPU-only torch on Linux avoids pulling ~2 GB of CUDA wheels; macOS/Windows use PyPI.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
