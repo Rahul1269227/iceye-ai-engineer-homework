@@ -45,6 +45,10 @@ torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning:glinker.*",
+    "ignore:There is no current event loop:DeprecationWarning:pydantic_graph.*",
+]
 
 [tool.ruff]
 line-length = 100
