@@ -30,7 +30,7 @@ from iceye_homework.blobs import (
     fit_blob_boxes,
     load_mask,
 )
-from iceye_homework.blobs.fit import label_blobs
+from iceye_homework.blobs.fit import label_blobs, min_area_rect
 
 CPUS = os.cpu_count() or 1
 
@@ -55,8 +55,7 @@ def min_area_rects(blobs: Sequence[np.ndarray]) -> list[RotatedBox]:
     boxes = []
     for blob in blobs:
         ys, xs = np.nonzero(blob)
-        (cx, cy), (w, h), angle = cv2.minAreaRect(np.column_stack([xs, ys]).astype(np.float32))
-        boxes.append(RotatedBox(cx, cy, w, h, angle))
+        boxes.append(min_area_rect(xs, ys))
     return boxes
 
 
@@ -87,6 +86,8 @@ def mask_report(mask: np.ndarray) -> list[BlobFit]:
         if not np.allclose(ious, reported, rtol=0, atol=1e-12):
             raise AssertionError(f"{objective}: reported IoU does not match the CSV boxes")
         base = objective_iou(baseline, objective)
+        if not np.allclose(base, [fit.baseline_iou for fit in fits], rtol=0, atol=1e-12):
+            raise AssertionError(f"{objective}: fit baseline differs from cv2.minAreaRect")
         print(
             f"| `{objective}` | {ious.mean():.4f} | {np.median(ious):.4f} | {ious.min():.4f} "
             f"| {base.mean():.4f} | {np.count_nonzero(ious > base + 1e-9)}/{count} "

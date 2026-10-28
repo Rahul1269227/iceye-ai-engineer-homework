@@ -124,8 +124,6 @@ def _raster_iou(
     raster: Raster,
     shape: tuple[int, int] | None,
 ) -> float:
-    if box.width <= 0 or box.height <= 0:
-        return 0.0
     x_lo, y_lo, x_hi, y_hi = _window(xs, ys, box, shape)
     match raster:
         case "center":
@@ -193,8 +191,6 @@ class BlobScorer:
         return cached
 
     def _score(self, box: RotatedBox) -> float:
-        if box.width <= 0 or box.height <= 0:
-            return 0.0
         corners = box.corner_list()
         xs = [p[0] for p in corners]
         ys = [p[1] for p in corners]

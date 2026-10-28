@@ -23,7 +23,7 @@ outliers off. Per blob it runs:
 Every exact score is taken on the box exactly as it is reported (absolute coordinates,
 canonical form, rounded to ``DECIMALS``), so the reported IoU is reproducible from the
 CSV. Both minAreaRect seeds stay among the final candidates, so the result is never worse
-than that baseline.
+than ``cv2.minAreaRect`` up to that rounding.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ DECIMALS = 4
 Params = tuple[float, float, float, float, float]
 
 # Degenerate (zero-width) boxes still rasterise to their outline with cv2.fillPoly.
-_MIN_SIDE = 1e-3
 _SWEEP_STEP_DEG = 5.0
 _GRID_CAP = 64
 _SUPERSAMPLE = 2
@@ -196,13 +195,12 @@ def fit_blob(
 ) -> tuple[RotatedBox, float, float]:
     """Best rotated box for one blob given its integer pixel centres ``(xs, ys)``.
 
-    Returns ``(box, iou, baseline_iou)``. The baseline is the better of ``cv2.minAreaRect``
-    as returned (through the outer pixel centres) and grown by one pixel (to the outer
-    pixel edges).
+    Returns ``(box, iou, baseline_iou)``. The baseline is ``cv2.minAreaRect`` of the pixel
+    centres exactly as OpenCV returns it, scored the same way.
     """
     blob = _Blob.from_pixels(xs, ys, objective, shape)
 
-    tight = _min_area_rect(blob.dx, blob.dy)
+    tight = min_area_rect(blob.dx, blob.dy)
     enclosing = _inset(tight, -0.5)
     moments = _moments_seed(blob.dx, blob.dy)
     sweep = _sweep_boxes(blob.dx, blob.dy, [tight.angle, moments.angle])
@@ -230,14 +228,14 @@ def fit_blob(
         if (iou, tie) > (best_iou, best_tie + _TIE_TOL):
             best, best_iou, best_tie = box, iou, tie
 
-    baseline_iou = max(blob.exact_iou(tight), blob.exact_iou(enclosing))
+    baseline_iou = blob.scorer.iou(min_area_rect(xs, ys))
     return blob.finalize(best), best_iou, baseline_iou
 
 
-def _min_area_rect(dx: np.ndarray, dy: np.ndarray) -> RotatedBox:
-    points = np.column_stack([dx, dy]).astype(np.float32)
-    (cx, cy), (w, h), angle = cv2.minAreaRect(points)
-    return _params_box((cx, cy, w, h, angle))
+def min_area_rect(xs: np.ndarray, ys: np.ndarray) -> RotatedBox:
+    """``cv2.minAreaRect`` of the pixel centres, exactly as OpenCV returns it."""
+    (cx, cy), (w, h), angle = cv2.minAreaRect(np.column_stack([xs, ys]).astype(np.float32))
+    return RotatedBox(cx, cy, w, h, angle)
 
 
 def _inset(box: RotatedBox, margin: float) -> RotatedBox:
@@ -245,8 +243,8 @@ def _inset(box: RotatedBox, margin: float) -> RotatedBox:
     return RotatedBox(
         box.center_x,
         box.center_y,
-        max(box.width - 2.0 * margin, _MIN_SIDE),
-        max(box.height - 2.0 * margin, _MIN_SIDE),
+        max(box.width - 2.0 * margin, 0.0),
+        max(box.height - 2.0 * margin, 0.0),
         box.angle,
     )
 
@@ -368,7 +366,7 @@ def _box_params(box: RotatedBox) -> np.ndarray:
 
 def _params_box(params: Params | np.ndarray) -> RotatedBox:
     cx, cy, w, h, angle = (float(p) for p in params)
-    return RotatedBox(cx, cy, max(abs(w), _MIN_SIDE), max(abs(h), _MIN_SIDE), angle)
+    return RotatedBox(cx, cy, abs(w), abs(h), angle)
 
 
 def _refine(seed: RotatedBox, dx: np.ndarray, dy: np.ndarray) -> RotatedBox:
