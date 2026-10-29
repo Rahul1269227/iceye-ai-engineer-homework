@@ -57,9 +57,9 @@ def make_scan(pdf: Path, path: Path, dpi: int = 150) -> None:
     image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
     rows, cols = image.shape
     rotation = cv2.getRotationMatrix2D((cols / 2, rows / 2), 0.8, 1.0)
-    image = cv2.warpAffine(image, rotation, (cols, rows), borderValue=255)
-    image = cv2.GaussianBlur(image[: rows // 2], (3, 3), 0)  # the text fills the top half
-    cv2.imwrite(str(path), image, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+    rotated = cv2.warpAffine(image, rotation, (cols, rows), borderValue=255)
+    scan = cv2.GaussianBlur(rotated[: rows // 2], (3, 3), 0)  # the text fills the top half
+    cv2.imwrite(str(path), scan, [cv2.IMWRITE_PNG_COMPRESSION, 9])
 
 
 def main() -> None:

@@ -16,6 +16,7 @@ import os
 import statistics
 import time
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 
 import cv2
@@ -83,8 +84,8 @@ def mask_report(mask: np.ndarray) -> list[BlobFit]:
     per_objective: dict[Objective, np.ndarray] = {}
     fits_by_objective: dict[Objective, list[BlobFit]] = {}
     for objective in OBJECTIVES:
-        fits, serial = timed(lambda o=objective: fit_blob_boxes(mask, objective=o))
-        _, parallel = timed(lambda o=objective: fit_blob_boxes(mask, objective=o, workers=CPUS))
+        fits, serial = timed(partial(fit_blob_boxes, mask, objective=objective))
+        _, parallel = timed(partial(fit_blob_boxes, mask, objective=objective, workers=CPUS))
         scores = raster_ious(blobs, [fit.box for fit in fits])
         ious = objective_iou(scores, objective)
         reported = np.array([fit.iou for fit in fits])
@@ -116,7 +117,7 @@ def mask_report(mask: np.ndarray) -> list[BlobFit]:
 def restarts_report(mask: np.ndarray, counts: Sequence[int] = (0, 8, 16, 32, 64)) -> None:
     """Mean ``robust`` IoU and run time against the number of random restarts per blob."""
     runs = {
-        restarts: timed(lambda r=restarts: fit_blob_boxes(mask, workers=CPUS, restarts=r))
+        restarts: timed(partial(fit_blob_boxes, mask, workers=CPUS, restarts=restarts))
         for restarts in sorted({*counts, RESTARTS})
     }
     default = np.array([fit.iou for fit in runs[RESTARTS][0]])
