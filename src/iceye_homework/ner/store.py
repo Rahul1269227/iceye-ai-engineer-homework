@@ -35,6 +35,17 @@ def normalize(name: str) -> str:
     return _HONORIFIC.sub("", clean_surface(name)).casefold()
 
 
+def fold(text: str) -> str:
+    """Running text folded like :func:`normalize` folds a name: NFKC, single spaces,
+    casefolded, so normalised names can be found in it."""
+    return " ".join(unicodedata.normalize("NFKC", text).split()).casefold()
+
+
+def words(text: str) -> set[str]:
+    """The casefolded word tokens of ``text``."""
+    return set(_TOKEN.findall(fold(text)))
+
+
 @dataclass(frozen=True, slots=True)
 class LabelSummary:
     label: str
@@ -60,6 +71,11 @@ class EntityStore:
                 owner = self._by_key.setdefault(key, entity)
                 if owner is not entity:
                     raise ValueError(f"{surface!r} matches both {owner.name!r} and {entity.name!r}")
+        # Longest first, so "Aino Virtanen" is found as itself rather than as "Virtanen".
+        keys = sorted(self._by_key, key=len, reverse=True)
+        alternatives = "|".join(map(re.escape, keys)) or "(?!)"
+        self._names = re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
+        self.name_words = frozenset(word for key in self._by_key for word in _TOKEN.findall(key))
 
     @classmethod
     def load(cls, path: Path | str) -> EntityStore:
@@ -75,6 +91,14 @@ class EntityStore:
     def lookup(self, name: str) -> StoredEntity | None:
         """The entity whose name or alias matches ``name`` after normalisation."""
         return self._by_key.get(normalize(name))
+
+    def mentions_in(self, text: str) -> list[tuple[int, int, StoredEntity]]:
+        """``(start, end, entity)`` for each name or alias that ``fold(text)`` contains as
+        whole words, in order; offsets are into ``fold(text)``."""
+        return [
+            (match.start(), match.end(), self._by_key[match.group()])
+            for match in self._names.finditer(fold(text))
+        ]
 
     def search(self, query: str, label: str | None = None, limit: int = 10) -> list[StoredEntity]:
         """Entities whose name or an alias resembles ``query``: exact, substring, shared

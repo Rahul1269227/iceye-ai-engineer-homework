@@ -38,9 +38,11 @@ class Answer(BaseModel):
     """Structured reply to one question about the document's entities."""
 
     reply: str = Field(description="Short conversational reply that acknowledges the question")
+    # Not a schema limit: a longer list from the model is cut to MAX_ANSWER_ENTITIES by
+    # ask's validator, where a validation error would only cost a retry.
     entities: list[EntityMention] = Field(
         default_factory=list,
-        max_length=MAX_ANSWER_ENTITIES,
-        description="Only the entities the reply talks about, including names the user asked "
-        "about that are not in the store (mention_count 0). Never the full entity list.",
+        description=f"Only the entities the reply talks about (at most {MAX_ANSWER_ENTITIES}), "
+        "including names the user asked about that are not in the store (mention_count 0). "
+        "Never the full entity list.",
     )
