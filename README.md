@@ -41,13 +41,13 @@ uv run pytest
 
 ```text
 $ uv run ner-chat extract data/sample_report.pdf
-17 entities (27 mentions) from data/sample_report.pdf in 0.7s -> entities.json
+17 entities (27 mentions) from data/sample_report.pdf in 0.4s -> entities.json
 
 $ uv run ner-chat extract data/sample_scan.png --store scan.json
-18 entities (27 mentions) from data/sample_scan.png in 2.1s -> scan.json
+18 entities (27 mentions) from data/sample_scan.png in 2.0s -> scan.json
 ```
 
-The time shown covers text extraction and NER. Each `ner-chat` command also takes about 3.5 s to start, almost all of it spent importing torch, transformers and GLinker.
+The time shown covers text extraction and NER. Each `ner-chat` command also takes about 3.5 s to start, almost all of it spent importing torch, transformers and GLinker. An unsupported or unreadable file gives a one-line `error:` message and exit code 2.
 
 Options: `--labels person organization ...` (default: person, organization, location, date, event, product), `--threshold 0.4`, `--ner-model`, `--ocr-backend`, `--force-ocr` (OCR a PDF even if it has a text layer) and `--device cpu|cuda|mps`. Kreuzberg accepts PDFs, images, Office files, HTML and more. The default OCR backend, `paddleocr`, works after `uv sync`; `tesseract` needs the Tesseract binary and `easyocr` the `easyocr` package, neither of which is installed by this project.
 
@@ -82,33 +82,38 @@ $ uv run ner-chat ask "How many times are ICEYE and NASA mentioned?" --store tes
 | `offline` | nothing: a rule-based stand-in for an LLM, built on Pydantic AI's `FunctionModel` |
 | `test` | nothing: Pydantic AI's `TestModel`, which calls every tool and returns placeholder text |
 
-`offline`, `test` and `ollama:qwen3:14b` were run against the sample stores. The OpenAI and Anthropic providers are installed and go through the same agent, but were not run here because no keys were available. The `offline` model picks names out of the question (quoted phrases or capitalised words), calls the same tools an LLM would and fills a template from the results. It is useful for trying the flow without a key; a real model handles free-form questions much better.
+`offline`, `test` and `ollama:qwen3:14b` were run against the sample stores. The OpenAI and Anthropic providers are installed and go through the same agent, but were not run here because no keys were available. The `offline` model picks names out of the question: quoted phrases, else capitalised words, else lower-case names in common shapes such as "is helsinki mentioned?". It looks up at most 10 of them with the same tools an LLM would call and fills a template from the results. With no names, it lists the top entities (of a label, if the question names one, such as "companies") or summarises the store. It is useful for trying the flow without a key; a real model handles free-form questions much better.
 
 ### How extraction works
 
-1. Kreuzberg extracts the text. PDFs and Office files use their text layer; images and scanned PDFs go through PaddleOCR, which is bundled with Kreuzberg, so no system OCR install is needed. On `data/sample_scan.png` it read 96.7% of words correctly. Most errors were l/i swaps such as "Heisinki" for "Helsinki".
+1. Kreuzberg extracts the text. PDFs and Office files use their text layer; images and scanned PDFs go through PaddleOCR, which is bundled with Kreuzberg, so no system OCR install is needed. On `data/sample_scan.png` it read 162 of 168 words (96.4%) correctly. Four of the six misses were l/i swaps such as "Heisinki" for "Helsinki"; the other two were "will present", read as one word.
 2. The text is split into chunks of up to 200 words at sentence boundaries, keeping exact character offsets. GLiNER models have a short context window.
-3. GLinker's `l1_gliner` processor runs `knowledgator/gliner-bi-edge-v2.0`, a bi-encoder with a 32M-parameter Ettin text encoder and a MiniLM label encoder, on each chunk. Label embeddings are computed once and reused. GLiNER builds the encoders from their config and then loads every weight from the checkpoint, so the model is built under transformers' `no_init_weights()`, which skips the random initialisation in between. That cuts the model load from about 3 s to 0.4 s and gives a bit-identical model.
+3. GLinker's `l1_gliner` processor runs `knowledgator/gliner-bi-edge-v2.0`, a bi-encoder with a 32M-parameter Ettin text encoder and a MiniLM label encoder, on each chunk. Label embeddings are computed once and reused. GLiNER builds the encoders from their config and then loads every weight from the checkpoint, so the model is built under transformers' `no_init_weights()`, which skips the random initialisation in between. That cuts the model load from about 3 s to 0.4 s and gives a bit-identical model. When the model and its tokenizers are already in the Hugging Face cache, they are loaded without contacting the Hub, which would otherwise add about 1.5 s of freshness checks. If anything is missing, the load falls back to the Hub, unless `HF_HUB_OFFLINE=1` is set.
 4. Mentions are grouped by a normalised name: NFKC, collapsed whitespace, edge punctuation, a trailing possessive "'s", honorifics such as "Dr." and case are all ignored. So "Dr. Aino Virtanen" and "Aino Virtanen" count as one person with two mentions. The display name is the most frequent surface form, the label is the majority label, and the other forms are kept as aliases that `ask` can look up.
 5. The store is written atomically (temporary file, then rename) as JSON: `{source, model, labels, entities: [{name, label, count, aliases}]}`. A few dozen entities do not need a database, and the same format is used for the test fixture.
 
 ### How `ask` stays grounded
 
-`ask` never opens the document, and the model never sees the entity list. Its instructions describe only the tools, and it can read the store through these four, each capped at 10 rows:
+`ask` never opens the document, and the model never sees the entity list. Its instructions describe only the tools, and it can read the store through these four, each returning at most 10 rows per call:
 
 - `count_mentions(name)`: exact or alias lookup. An absent name returns `found: false`, a count of 0 and up to three spelling suggestions.
 - `search_entities(query, label)`: substring, shared-word and close-spelling matches.
 - `top_entities(label)`: the most mentioned entities, optionally of one label.
-- `list_labels()`: entity and mention totals per label.
+- `list_labels()`: entity and mention totals for the 10 most mentioned labels and for the whole store.
 
-The output type is `Answer`: a `reply` string plus `entities`, at most 10 items of `{name, label, mention_count, in_store}`. An output validator runs on every answer before it is returned:
+The output type is `Answer`: a `reply` string plus `entities`, a list of `{name, label, mention_count, in_store}`. An output validator runs on every answer before it is returned:
 
-- Each cited entity is replaced by the store's record, with canonical name, label and count. A name the store does not have becomes `label: null, mention_count: 0, in_store: false`. Duplicates are dropped. The model cannot report a wrong count or label in `entities`, even if it tries.
-- Counts quoted in the reply ("7 times", "two mentions", "twice") are checked against the counts the tools returned during the run. An unsupported number raises `ModelRetry` with the correct figures, and the model rewrites the reply (up to two retries).
+- Each cited entity is replaced by the store's record, with canonical name, label and count. A name the store does not have becomes `label: null, mention_count: 0, in_store: false`. Duplicates are dropped and the list is cut to 10. The model cannot report a wrong count or label in `entities`, even if it tries.
+- Every count quoted in the reply ("7 times", "two mentions", "twice", "on 9 occasions") belongs to the nearest name before it in its sentence. That name is either a store entity or an absent name, which counts as 0. The count must equal that name's count, or the sum over the store entities the sentence names ("5 times together"). A count with no name before it may also be a store total from `list_labels`, or any count a tool returned if the sentence names nothing. So "Pori is mentioned 2 times" is rejected even when 2 is Helsinki's count.
+- Every capitalised word in the reply must appear in a store name, a label or the question, so the reply cannot bring in entities from outside the store. The first word of a sentence is exempt unless it is an acronym.
 
-Names in the free-text reply are not checked; the `entities` list is the authoritative, store-backed part of the answer. Extraction quality is bounded by GLiNER and OCR. For example, OCR turned "Helsinki team" into "Heisinki team", which GLiNER then tagged as an organization.
+A reply that fails a check goes back to the model with `ModelRetry`, which names the bad counts or names and gives the right figures (up to two retries). If the model still fails, or uses more than 8 requests (for example by looping on tools), `ask` logs a warning to stderr and answers with the `offline` model from the same tools, so a question still gets a store-backed answer. Configuration errors, such as a missing API key, are reported as errors instead.
+
+These checks are heuristics on free text. They catch wrong or invented counts and names, not every misleading sentence; the `entities` list is the authoritative, store-backed part of the answer. The caps are per call, so a model that makes many calls can still page through a small store, but nothing hands it the inventory. Extraction quality is bounded by GLiNER and OCR. For example, OCR turned "Helsinki team" into "Heisinki team", which GLiNER then tagged as an organization.
 
 ## Part 2: blob bounding boxes
+
+IoU here is between pixel sets, as the brief describes it: the blob's pixels against "that mask defined by the rectangle itself (filled rectangle essentially)". The brief does not say how a rectangle is filled into pixels, so the fit supports four rasterisations and by default does well under all of them (see [Which mask does a rectangle define?](#which-mask-does-a-rectangle-define)). Treating the rectangle as a continuous polygon and each pixel as a unit square, as Shapely-style polygon IoU does, is a different metric with different optima. Under it, the default boxes, which are fitted to painted pixels, average 0.5830 against 0.5935 for `cv2.minAreaRect`, while the `--objective center` boxes average 0.7557.
 
 ### Usage
 
@@ -117,7 +122,7 @@ uv run blob-boxes data/example_mask.jpg                        # -> blob_boundin
 uv run blob-boxes mask.npy --out boxes.csv --overlay overlay.png
 ```
 
-The mask can be a `.npy` 2D array (non-zero is foreground) or an image (grey value above `--threshold`, default 127, which also removes JPEG noise). Other options: `--objective` (see below), `--connectivity 4|8`, `--min-area`, `--restarts` (random restarts per blob, default 8; see the results below) and `--workers` (default: all CPUs). From Python:
+The mask can be a `.npy` 2D array (non-zero is foreground) or an image. An image whose values are all 0 or 1 is read as a 0/1 mask. Otherwise foreground is a grey value above `--threshold` (default 127), which suppresses most JPEG compression noise; a few stray pixels survive as tiny blobs. A mask with no foreground gives a CSV with only the header, plus a warning. Other options: `--objective` (see below), `--connectivity 4|8`, `--min-area`, `--restarts` (random restarts per blob, default 8; see the results below) and `--workers` (default: all CPUs). From Python:
 
 ```python
 from pathlib import Path
@@ -128,7 +133,7 @@ fits = fit_blob_boxes(mask)
 write_csv(fits, Path("blob_bounding_boxes.csv"))
 ```
 
-Output for the example mask:
+Output for the example mask (the CSV is included as `blob_bounding_boxes.csv`):
 
 ```text
 136 blobs in 2.06s -> blob_bounding_boxes.csv
@@ -140,7 +145,9 @@ blob_id,center_x,center_y,width,height,angle
 ...
 ```
 
-The coordinates follow OpenCV's `RotatedRect`. `x` is the column and `y` the row, and pixel centres sit at integer coordinates. `width >= height`, the angle is in degrees in [-90, 90), and the width side points along (cos angle, sin angle) with y pointing down. `cv2.boxPoints(((center_x, center_y), (width, height), angle))` gives the corners. Blob ids are 1..N in raster order of each blob's first pixel. Values are rounded to 4 decimals, and the reported IoU is computed on the rounded boxes, so it can be reproduced from the CSV. Four blobs in the example are a single pixel wide; their best box has height 0, a segment that every rasterisation paints as exactly the blob, which is also what `cv2.minAreaRect` returns for them.
+The coordinates follow OpenCV's `RotatedRect`. `x` is the column and `y` the row, and pixel centres sit at integer coordinates. `width >= height`, the angle is in degrees in [-90, 90), and the width side points along (cos angle, sin angle) with y pointing down. `cv2.boxPoints(((center_x, center_y), (width, height), angle))` gives the corners. Blob ids are 1..N in raster order of each blob's first pixel, the same numbering as `scipy.ndimage.label` (OpenCV's labels are renumbered to match). Values are rounded to 4 decimals, and the reported IoU is computed on the rounded boxes, so it can be reproduced from the CSV.
+
+Four boxes in the example have height 0, a segment. Blobs 86 and 89 are straight lines of pixel centres, which every rasterisation paints as exactly the blob (IoU 1), and `cv2.minAreaRect` gives the same segment. Blobs 22 and 85 have 7 and 4 pixels and are two pixels wide in places; a segment still scores best for them under the default objective (IoU 0.7143 and 0.75). A single-pixel blob gets a 0 x 0 box. Such boxes have no area, so a metric that measures the rectangle as a polygon scores them 0, and under `center` they cover only the pixel centres exactly on them.
 
 ### Which mask does a rectangle define?
 
@@ -164,7 +171,7 @@ Each blob is fitted independently, in parallel processes, and the result is dete
 
 Exact scoring is most of the run time, so candidate boxes are scored in batches on a small window around the blob: one vectorised pixel-centre test, and one `cv2.fillPoly` call per fill model, with each box drawn in its own band of a stacked canvas.
 
-The `minAreaRect` seeds stay among the candidates, so the result is never worse than `cv2.minAreaRect` (up to the 4-decimal rounding; on the example mask it is never worse under any objective).
+The `minAreaRect` seeds stay among the candidates, so before rounding the result is never worse than `cv2.minAreaRect`. Rounding to 4 decimals can still cost a box that runs exactly through pixel centres. On a straight diagonal line of 10 pixels, the default box scores 0.9773 against 1.0 for the unrounded `cv2.minAreaRect`. On the example mask no blob is affected: the result is never worse under any objective.
 
 ### Results
 
@@ -215,8 +222,8 @@ uv run pytest
 
 There is one test per part, and both run offline with no API key in about 5 seconds.
 
-- `tests/test_part1_ask.py` runs the `ask` path against the fixture store `tests/entities.json` with Pydantic AI's `TestModel` and real model requests disabled. The model cites a known entity by its alias, with the wrong label and count, and an absent name. The test checks that the answer reports the store's count for the known name and 0 / not in the store for the absent one, that the tools were used, and that no store entity appears in the prompt. It also runs the CLI with `--model test`.
-- `tests/test_part2_blobs.py` paints three rotated rectangles with `cv2.fillPoly` and checks that they are recovered with IoU 1. It adds a square with a one-pixel spur, where the fit must beat `cv2.minAreaRect` clearly, and checks the CLI's CSV header and angle range.
+- `tests/test_part1_ask.py` runs the `ask` path against the fixture store `tests/entities.json` with Pydantic AI's `TestModel` and real model requests disabled. The model cites a known entity by its alias, with the wrong label and count, and an absent name. The test checks that the answer reports the store's name, label and count for the known entity and 0 / not in the store for the absent one, that `count_mentions` was called, and that no store entity name appears in the instructions sent to the model. It also runs the CLI with `--model test --json` and checks that the output parses as an `Answer`.
+- `tests/test_part2_blobs.py` paints three rotated rectangles with `cv2.fillPoly` and checks that they are recovered with IoU 1 and close to their true parameters. It adds a square with a one-pixel spur, where the fit must beat `cv2.minAreaRect` clearly, and checks the CLI's CSV header, row count and angle range.
 
 ## Repository layout
 
@@ -229,6 +236,7 @@ tests/            entities.json fixture, one test per part
 data/             example_mask.jpg (from the brief), sample_report.pdf, sample_scan.png
 scripts/          benchmark.py (Part 2 numbers and figure), make_samples.py (sample documents)
 docs/             blobs_zoom.png
+blob_bounding_boxes.csv   Part 2 result for data/example_mask.jpg
 ```
 
 `data/sample_report.pdf` is a fictional one-page report with a text layer, and `data/sample_scan.png` is the same page rasterised at 150 dpi, slightly rotated and blurred, to exercise OCR. `uv run scripts/make_samples.py` regenerates both; its dependencies, including PyMuPDF, are declared inline (PEP 723) so they stay out of the project. Code style is checked with `uv run ruff check` and `uv run ruff format --check`.
