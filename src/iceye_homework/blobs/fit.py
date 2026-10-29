@@ -38,14 +38,19 @@ import cv2
 import numpy as np
 from scipy.optimize import minimize
 
-from .geometry import BlobScorer, Objective, Raster, RotatedBox, objective_rasters
+from .geometry import (
+    BlobScorer,
+    BoxParams,
+    Objective,
+    Raster,
+    RotatedBox,
+    canonical_params,
+    objective_rasters,
+)
 
 DECIMALS = 4
+RESTARTS = 8
 
-# (center_x, center_y, width, height, angle)
-Params = tuple[float, float, float, float, float]
-
-# Degenerate (zero-width) boxes still rasterise to their outline with cv2.fillPoly.
 _SWEEP_STEP_DEG = 5.0
 _GRID_CAP = 64
 _SUPERSAMPLE = 2
@@ -57,7 +62,6 @@ _POLISH_MIN_STEP = 1.0 / 16.0
 _POLISH_MAX_ITER = 500
 # Rotation step per unit of polish step; pivot moves rotate about either end of the box.
 _POLISH_DEG_PER_STEP = 4.0
-_RESTARTS = 8
 _RESTART_SCALE = np.array([1.0, 1.0, 1.5, 1.5, 15.0])
 # Tie-score gains below this do not count as progress on an exact-IoU plateau.
 _TIE_TOL = 1e-9
@@ -96,7 +100,7 @@ class _Blob:
         grow = sum(_paint_growth(raster) for raster in rasters) / len(rasters)
         return cls(xs - ax, ys - ay, ax, ay, BlobScorer(xs, ys, objective, shape), grow)
 
-    def tie_score(self, params: Params) -> float:
+    def tie_score(self, params: BoxParams) -> float:
         """Smooth IoU of the region the raster models paint, for breaking exact-IoU ties."""
         cx, cy, w, h, angle = params
         g = self.tie_grow
@@ -104,20 +108,22 @@ class _Blob:
 
     def finalize(self, box: RotatedBox) -> RotatedBox:
         """Relative box -> the box as reported: absolute, canonical, rounded."""
-        absolute = RotatedBox(
-            box.center_x + self.anchor_x, box.center_y + self.anchor_y,
-            box.width, box.height, box.angle,
-        ).canonical()  # fmt: skip
-        return RotatedBox(
-            round(absolute.center_x, DECIMALS),
-            round(absolute.center_y, DECIMALS),
-            round(absolute.width, DECIMALS),
-            round(absolute.height, DECIMALS),
-            round(absolute.angle, DECIMALS),
-        )
+        return RotatedBox(*self._finalize(box.params()))
 
     def exact_iou(self, box: RotatedBox) -> float:
-        return self.scorer.iou(self.finalize(box))
+        return self.exact_ious([box.params()])[0]
+
+    def exact_ious(self, boxes: list[BoxParams]) -> list[float]:
+        """Exact IoU of each relative box as it would be reported, scored in one batch."""
+        return self.scorer.ious([self._finalize(params) for params in boxes])
+
+    def _finalize(self, params: BoxParams) -> BoxParams:
+        cx, cy, w, h, angle = params
+        x, y, w, h, angle = canonical_params((cx + self.anchor_x, cy + self.anchor_y, w, h, angle))
+        return (
+            round(x, DECIMALS), round(y, DECIMALS),
+            round(w, DECIMALS), round(h, DECIMALS), round(angle, DECIMALS),
+        )  # fmt: skip
 
     def soft_iou(self, box: RotatedBox) -> float:
         return _soft_iou_params(_box_params(box), self.dx, self.dy)
@@ -149,13 +155,15 @@ def fit_blob_boxes(
     min_area: int = 1,
     objective: Objective = "robust",
     workers: int = 1,
+    restarts: int = RESTARTS,
 ) -> list[BlobFit]:
     """Fit one IoU-maximising rotated box per connected component of ``mask``.
 
     Blob ids are assigned 1..N in raster order of each blob's first pixel. IoU is measured
     against the box mask clipped to the image, as an image-sized evaluation would see it.
     Blobs are independent, so ``workers > 1`` fits them in that many processes; the result
-    is identical either way.
+    is identical either way. ``restarts`` is the number of random restarts per blob; more
+    never lowers a blob's IoU, and each one adds about the same time.
     """
     if mask.ndim != 2:
         raise ValueError(f"expected a 2D mask, got shape {mask.shape}")
@@ -171,7 +179,7 @@ def fit_blob_boxes(
         areas.append(area)
 
     xs_all, ys_all = [xs for xs, _ in pixels], [ys for _, ys in pixels]
-    args = (xs_all, ys_all, repeat(objective), repeat(mask.shape))
+    args = (xs_all, ys_all, repeat(objective), repeat(mask.shape), repeat(restarts))
     # Process start-up costs more than fitting a handful of blobs.
     if workers > 1 and len(pixels) >= 4 * workers:
         with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -192,6 +200,7 @@ def fit_blob(
     ys: np.ndarray,
     objective: Objective = "robust",
     shape: tuple[int, int] | None = None,
+    restarts: int = RESTARTS,
 ) -> tuple[RotatedBox, float, float]:
     """Best rotated box for one blob given its integer pixel centres ``(xs, ys)``.
 
@@ -213,16 +222,18 @@ def fit_blob(
     insets = {_paint_growth(raster) / 2.0 for raster in objective_rasters(objective)} - {0.0}
     candidates += [_inset(box, margin) for margin in sorted(insets) for box in candidates]
 
-    ranked = sorted(
-        candidates,
-        key=lambda box: (blob.exact_iou(box), blob.tie_score(_box_params(box))),
+    exact = blob.exact_ious([box.params() for box in candidates])
+    order = sorted(
+        range(len(candidates)),
+        key=lambda i: (exact[i], blob.tie_score(_box_params(candidates[i]))),
         reverse=True,
     )
+    ranked = [candidates[i] for i in order]
     best, best_iou, best_tie = max(
         (_polish(blob, box) for box in ranked[:_POLISH_TOP_K]), key=lambda r: (r[1], r[2])
     )
     rng = np.random.default_rng([xs.size, int(xs.min()), int(ys.min())])
-    for _ in range(_RESTARTS):
+    for _ in range(restarts):
         start = _params_box(_box_params(best) + rng.normal(0.0, _RESTART_SCALE))
         box, iou, tie = _polish(blob, start)
         if (iou, tie) > (best_iou, best_tie + _TIE_TOL):
@@ -364,7 +375,7 @@ def _box_params(box: RotatedBox) -> np.ndarray:
     return np.array([box.center_x, box.center_y, box.width, box.height, box.angle])
 
 
-def _params_box(params: Params | np.ndarray) -> RotatedBox:
+def _params_box(params: BoxParams | np.ndarray) -> RotatedBox:
     cx, cy, w, h, angle = (float(p) for p in params)
     return RotatedBox(cx, cy, abs(w), abs(h), angle)
 
@@ -389,15 +400,15 @@ def _polish(blob: _Blob, box: RotatedBox) -> tuple[RotatedBox, float, float]:
     where small perturbations (e.g. rounding the corners) are least likely to change the
     painted pixels. Returns ``(box, exact_iou, tie_score)``.
     """
-    params = (box.center_x, box.center_y, box.width, box.height, box.angle)
+    params = box.params()
     iou, tie = blob.exact_iou(box), blob.tie_score(params)
     step = _POLISH_START_STEP
     for _ in range(_POLISH_MAX_ITER):
         if step < _POLISH_MIN_STEP:
             break
         best_iou, best_tie, best_params = iou, tie, None
-        for trial in _moves(params, step):
-            trial_iou = blob.exact_iou(_params_box(trial))
+        trials = _moves(params, step)
+        for trial, trial_iou in zip(trials, blob.exact_ious(trials), strict=True):
             if trial_iou < best_iou:
                 continue
             trial_tie = blob.tie_score(trial)
@@ -410,7 +421,7 @@ def _polish(blob: _Blob, box: RotatedBox) -> tuple[RotatedBox, float, float]:
     return _params_box(params), iou, tie
 
 
-def _moves(params: Params, step: float) -> list[Params]:
+def _moves(params: BoxParams, step: float) -> list[BoxParams]:
     """Neighbouring boxes: each parameter +-step, one side out/in, rotation about an end.
 
     Moving a single side (resize plus half-step shift) adds or drops one row of pixels on
@@ -419,7 +430,7 @@ def _moves(params: Params, step: float) -> list[Params]:
     cx, cy, w, h, angle = params
     theta = math.radians(angle)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
-    moves: list[Params] = []
+    moves: list[BoxParams] = []
     for sign in (1.0, -1.0):
         delta = sign * step
         moves += [

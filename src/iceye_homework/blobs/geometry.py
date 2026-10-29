@@ -25,6 +25,7 @@ The ``"robust"`` objective scores a box by its mean IoU over the four.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, assert_never
 
@@ -46,6 +47,11 @@ def objective_rasters(objective: Objective) -> tuple[Raster, ...]:
 _EDGE_EPS = 1e-9
 # cv2.fillPoly fixed-point precision for "subpixel": coordinates are given in 1/16 pixel.
 _FILL_SHIFT = 4
+# Window pixels scored per batch, which bounds BlobScorer's temporary arrays (~50 MB).
+_BATCH_PIXELS = 1 << 20
+
+# ``(center_x, center_y, width, height, angle)``: the search's hot loops use plain tuples.
+BoxParams = tuple[float, float, float, float, float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,15 +62,12 @@ class RotatedBox:
     height: float
     angle: float
 
+    def params(self) -> BoxParams:
+        return (self.center_x, self.center_y, self.width, self.height, self.angle)
+
     def canonical(self) -> RotatedBox:
         """Same rectangle with ``width >= height`` and ``angle`` in ``[-90, 90)``."""
-        width, height, angle = abs(self.width), abs(self.height), self.angle
-        if width < height:
-            width, height, angle = height, width, angle + 90.0
-        # A square repeats every 90 degrees, so it folds into [-45, 45).
-        period = 90.0 if width == height else 180.0
-        angle = (angle + period / 2.0) % period - period / 2.0
-        return RotatedBox(self.center_x, self.center_y, width, height, angle)
+        return RotatedBox(*canonical_params(self.params()))
 
     def corners(self) -> np.ndarray:
         """Corner points as a ``(4, 2)`` array of ``(x, y)``, in ``cv2.boxPoints`` order."""
@@ -85,6 +88,18 @@ class RotatedBox:
         p2 = (2 * self.center_x - p0[0], 2 * self.center_y - p0[1])
         p3 = (2 * self.center_x - p1[0], 2 * self.center_y - p1[1])
         return [p0, p1, p2, p3]
+
+
+def canonical_params(params: BoxParams) -> BoxParams:
+    """``RotatedBox.canonical`` on a parameter tuple."""
+    center_x, center_y, width, height, angle = params
+    width, height = abs(width), abs(height)
+    if width < height:
+        width, height, angle = height, width, angle + 90.0
+    # A square repeats every 90 degrees, so it folds into [-45, 45).
+    period = 90.0 if width == height else 180.0
+    angle = (angle + period / 2.0) % period - period / 2.0
+    return (center_x, center_y, width, height, angle)
 
 
 def contains(xs: np.ndarray, ys: np.ndarray, box: RotatedBox) -> np.ndarray:
@@ -147,9 +162,11 @@ def _raster_iou(
 class BlobScorer:
     """Exact ``pixel_iou`` of many candidate boxes against one fixed blob.
 
-    Boxes that stay inside a small window around the blob are scored on that window
-    (one fill or one vectorised test over a few hundred pixels); anything larger falls
-    back to ``pixel_iou``. Scores are memoised because local searches revisit boxes.
+    Boxes that stay inside a small window around the blob are scored on that window, a
+    whole batch at a time: one vectorised pixel-centre test, and one ``cv2.fillPoly`` call
+    per fill model with every box's polygon in its own band of a stacked canvas. Anything
+    larger falls back to ``pixel_iou``. Scores are memoised because local searches revisit
+    boxes. The result is exactly ``pixel_iou``, box by box.
     """
 
     def __init__(
@@ -175,51 +192,95 @@ class BlobScorer:
         self._blob = np.zeros((y_hi - y_lo + 1, x_hi - x_lo + 1), dtype=bool)
         self._blob[(ys - y_lo).astype(np.intp), (xs - x_lo).astype(np.intp)] = True
         self._n = xs.size
-        if "center" in self._rasters:
-            self._gx, self._gy = np.meshgrid(
-                np.arange(x_lo, x_hi + 1, dtype=np.float64),
-                np.arange(y_lo, y_hi + 1, dtype=np.float64),
-            )
-        self._cache: dict[tuple[float, ...], float] = {}
+        self._origin = np.array([x_lo, y_lo])
+        self._cols = np.arange(x_lo, x_hi + 1, dtype=np.float64)
+        self._rows = np.arange(y_lo, y_hi + 1, dtype=np.float64)
+        self._cache: dict[BoxParams, float] = {}
 
     def iou(self, box: RotatedBox) -> float:
-        key = (box.center_x, box.center_y, box.width, box.height, box.angle)
-        cached = self._cache.get(key)
-        if cached is None:
-            cached = self._score(box)
-            self._cache[key] = cached
-        return cached
+        return self.ious([box.params()])[0]
 
-    def _score(self, box: RotatedBox) -> float:
-        corners = box.corner_list()
-        xs = [p[0] for p in corners]
-        ys = [p[1] for p in corners]
+    def ious(self, boxes: Sequence[BoxParams]) -> list[float]:
+        """Exact IoU of each box, scoring the new ones that fit the window in one batch."""
+        cache = self._cache
+        fresh = list(dict.fromkeys(box for box in boxes if box not in cache))
+        if fresh:
+            fits = self._fits(fresh)
+            batch = [box for box, ok in zip(fresh, fits, strict=True) if ok]
+            size = max(1, _BATCH_PIXELS // self._blob.size)
+            for start in range(0, len(batch), size):
+                chunk = batch[start : start + size]
+                cache.update(zip(chunk, self._score_batch(chunk), strict=True))
+            for box, ok in zip(fresh, fits, strict=True):
+                if not ok:
+                    cache[box] = pixel_iou(
+                        self._xs, self._ys, RotatedBox(*box), self._objective, self._shape
+                    )
+        return [cache[box] for box in boxes]
+
+    def _fits(self, boxes: list[BoxParams]) -> list[bool]:
+        cx, cy, w, h, angle = np.array(boxes).T
+        theta = np.radians(angle)
+        cos_t, sin_t = np.abs(np.cos(theta)), np.abs(np.sin(theta))
+        half_x = (np.abs(w) * cos_t + np.abs(h) * sin_t) / 2.0
+        half_y = (np.abs(w) * sin_t + np.abs(h) * cos_t) / 2.0
         x_lo, y_lo, x_hi, y_hi = self._bounds
         # One pixel of slack covers fillPoly painting beyond the outline and integer snapping.
-        fits = (
-            (self._open[0] or min(xs) - 1 >= x_lo)
-            and (self._open[1] or min(ys) - 1 >= y_lo)
-            and (self._open[2] or max(xs) + 1 <= x_hi)
-            and (self._open[3] or max(ys) + 1 <= y_hi)
-        )
-        if not fits:
-            return pixel_iou(self._xs, self._ys, box, self._objective, self._shape)
-        total = 0.0
-        points = box_points(box)
+        return (
+            (self._open[0] | (cx - half_x - 1 >= x_lo))
+            & (self._open[1] | (cy - half_y - 1 >= y_lo))
+            & (self._open[2] | (cx + half_x + 1 <= x_hi))
+            & (self._open[3] | (cy + half_y + 1 <= y_hi))
+        ).tolist()
+
+    def _score_batch(self, boxes: list[BoxParams]) -> list[float]:
+        total = np.zeros(len(boxes))
+        points: np.ndarray | None = None
         for raster in self._rasters:
             match raster:
                 case "center":
-                    inside = contains(self._gx, self._gy, box)
+                    inside = self._contains_batch(boxes)
                 case "subpixel" | "round" | "truncate":
-                    canvas = np.zeros(self._blob.shape, dtype=np.uint8)
-                    _fill(canvas, points, raster, x_lo, y_lo)
-                    inside = canvas.view(bool)
+                    if points is None:
+                        points = np.stack([_box_points(box) for box in boxes])
+                    inside = self._fill_batch(points, raster)
                 case _:
                     assert_never(raster)
-            inter = int(np.count_nonzero(inside & self._blob))
-            union = self._n + int(np.count_nonzero(inside)) - inter
-            total += inter / union if union else 0.0
-        return total / len(self._rasters)
+            inter = np.count_nonzero(inside & self._blob, axis=(1, 2))
+            union = self._n + np.count_nonzero(inside, axis=(1, 2)) - inter
+            total += inter / union
+        return (total / len(self._rasters)).tolist()
+
+    def _contains_batch(self, boxes: list[BoxParams]) -> np.ndarray:
+        """``contains`` over the window for every box, element for element the same sums."""
+        thetas = [math.radians(box[4]) for box in boxes]
+        cos_t = np.array([math.cos(theta) for theta in thetas])[:, None, None]
+        sin_t = np.array([math.sin(theta) for theta in thetas])[:, None, None]
+        half_w = np.array([abs(box[2]) / 2 + _EDGE_EPS for box in boxes])[:, None, None]
+        half_h = np.array([abs(box[3]) / 2 + _EDGE_EPS for box in boxes])[:, None, None]
+        centers = np.array([box[:2] for box in boxes])
+        dx = (self._cols[None, :] - centers[:, :1])[:, None, :]
+        dy = (self._rows[None, :] - centers[:, 1:])[:, :, None]
+        u = dx * cos_t + dy * sin_t
+        v = dy * cos_t - dx * sin_t
+        return (np.abs(u) <= half_w) & (np.abs(v) <= half_h)
+
+    def _fill_batch(
+        self, points: np.ndarray, raster: Literal["subpixel", "round", "truncate"]
+    ) -> np.ndarray:
+        """``_fill`` of every box into its own window-sized band of one canvas."""
+        count, (rows, cols) = len(points), self._blob.shape
+        polygons, shift = _fill_points(points, raster, self._origin)
+        canvas = np.zeros((count * rows, cols), dtype=np.uint8)
+        if self._open[1] or self._open[3]:
+            # Boxes may run past the top or bottom of the window, i.e. into another band.
+            for k in range(count):
+                band = canvas[k * rows : (k + 1) * rows]
+                cv2.fillPoly(band, [polygons[k]], 1, cv2.LINE_8, shift)
+        else:
+            polygons[:, :, 1] += (np.arange(count, dtype=np.int32) * (rows << shift))[:, None]
+            cv2.fillPoly(canvas, list(polygons), 1, cv2.LINE_8, shift)
+        return canvas.reshape(count, rows, cols).view(bool)
 
 
 def _window(
@@ -240,7 +301,12 @@ def _window(
 
 def box_points(box: RotatedBox) -> np.ndarray:
     """``cv2.boxPoints`` corners (float32), exactly as a caller rasterising a CSV row gets them."""
-    return cv2.boxPoints(((box.center_x, box.center_y), (box.width, box.height), box.angle))
+    return _box_points(box.params())
+
+
+def _box_points(params: BoxParams) -> np.ndarray:
+    center_x, center_y, width, height, angle = params
+    return cv2.boxPoints(((center_x, center_y), (width, height), angle))
 
 
 def _fill(
@@ -250,24 +316,30 @@ def _fill(
     x0: int = 0,
     y0: int = 0,
 ) -> None:
-    """``cv2.fillPoly`` ``box_points`` corners onto ``canvas``, whose top-left is ``(x0, y0)``.
+    """``cv2.fillPoly`` ``box_points`` corners onto ``canvas``, whose top-left is ``(x0, y0)``."""
+    points, shift = _fill_points(corners, raster, np.array([x0, y0]))
+    cv2.fillPoly(canvas, [points], 1, cv2.LINE_8, shift)
 
-    The integer snapping happens in absolute coordinates, so the result does not depend on
-    the window origin.
+
+def _fill_points(
+    corners: np.ndarray, raster: Literal["subpixel", "round", "truncate"], origin: np.ndarray
+) -> tuple[np.ndarray, int]:
+    """``cv2.fillPoly`` vertices (int32, relative to ``origin``) and shift for ``corners``.
+
+    Works on any ``(..., 4, 2)`` stack of corners. The integer snapping happens in absolute
+    coordinates, so the fill does not depend on the origin.
     """
-    origin = np.array([x0, y0])
     match raster:
         case "subpixel":
             # Round half up (not half-to-even) so the fill is invariant to integer shifts.
             scaled = (corners.astype(np.float64) - origin) * (1 << _FILL_SHIFT)
-            points, shift = np.floor(scaled + 0.5), _FILL_SHIFT
+            return np.floor(scaled + 0.5).astype(np.int32), _FILL_SHIFT
         case "round":
-            points, shift = np.round(corners).astype(np.int64) - origin, 0
+            return (np.round(corners).astype(np.int64) - origin).astype(np.int32), 0
         case "truncate":
-            points, shift = corners.astype(np.int64) - origin, 0
+            return (corners.astype(np.int64) - origin).astype(np.int32), 0
         case _:
             assert_never(raster)
-    cv2.fillPoly(canvas, [points.astype(np.int32)], 1, cv2.LINE_8, shift)
 
 
 def box_mask(box: RotatedBox, shape: tuple[int, int], raster: Raster = "subpixel") -> np.ndarray:

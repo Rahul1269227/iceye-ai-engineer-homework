@@ -41,11 +41,13 @@ uv run pytest
 
 ```text
 $ uv run ner-chat extract data/sample_report.pdf
-17 entities (27 mentions) from data/sample_report.pdf in 5.6s -> entities.json
+17 entities (27 mentions) from data/sample_report.pdf in 0.7s -> entities.json
 
 $ uv run ner-chat extract data/sample_scan.png --store scan.json
-18 entities (27 mentions) from data/sample_scan.png in 6.5s -> scan.json
+18 entities (27 mentions) from data/sample_scan.png in 2.1s -> scan.json
 ```
+
+The time shown covers text extraction and NER. Each `ner-chat` command also takes about 3.5 s to start, almost all of it spent importing torch, transformers and GLinker.
 
 Options: `--labels person organization ...` (default: person, organization, location, date, event, product), `--threshold 0.4`, `--ner-model`, `--ocr-backend`, `--force-ocr` (OCR a PDF even if it has a text layer) and `--device cpu|cuda|mps`. Kreuzberg accepts PDFs, images, Office files, HTML and more. The default OCR backend, `paddleocr`, works after `uv sync`; `tesseract` needs the Tesseract binary and `easyocr` the `easyocr` package, neither of which is installed by this project.
 
@@ -86,7 +88,7 @@ $ uv run ner-chat ask "How many times are ICEYE and NASA mentioned?" --store tes
 
 1. Kreuzberg extracts the text. PDFs and Office files use their text layer; images and scanned PDFs go through PaddleOCR, which is bundled with Kreuzberg, so no system OCR install is needed. On `data/sample_scan.png` it read 96.7% of words correctly. Most errors were l/i swaps such as "Heisinki" for "Helsinki".
 2. The text is split into chunks of up to 200 words at sentence boundaries, keeping exact character offsets. GLiNER models have a short context window.
-3. GLinker's `l1_gliner` processor runs `knowledgator/gliner-bi-edge-v2.0`, a bi-encoder with a 32M-parameter Ettin text encoder and a MiniLM label encoder, on each chunk. Label embeddings are computed once and reused.
+3. GLinker's `l1_gliner` processor runs `knowledgator/gliner-bi-edge-v2.0`, a bi-encoder with a 32M-parameter Ettin text encoder and a MiniLM label encoder, on each chunk. Label embeddings are computed once and reused. GLiNER builds the encoders from their config and then loads every weight from the checkpoint, so the model is built under transformers' `no_init_weights()`, which skips the random initialisation in between. That cuts the model load from about 3 s to 0.4 s and gives a bit-identical model.
 4. Mentions are grouped by a normalised name: NFKC, collapsed whitespace, edge punctuation, a trailing possessive "'s", honorifics such as "Dr." and case are all ignored. So "Dr. Aino Virtanen" and "Aino Virtanen" count as one person with two mentions. The display name is the most frequent surface form, the label is the majority label, and the other forms are kept as aliases that `ask` can look up.
 5. The store is written atomically (temporary file, then rename) as JSON: `{source, model, labels, entities: [{name, label, count, aliases}]}`. A few dozen entities do not need a database, and the same format is used for the test fixture.
 
@@ -115,20 +117,21 @@ uv run blob-boxes data/example_mask.jpg                        # -> blob_boundin
 uv run blob-boxes mask.npy --out boxes.csv --overlay overlay.png
 ```
 
-The mask can be a `.npy` 2D array (non-zero is foreground) or an image (grey value above `--threshold`, default 127, which also removes JPEG noise). Other options: `--objective` (see below), `--connectivity 4|8`, `--min-area` and `--workers` (default: all CPUs). From Python:
+The mask can be a `.npy` 2D array (non-zero is foreground) or an image (grey value above `--threshold`, default 127, which also removes JPEG noise). Other options: `--objective` (see below), `--connectivity 4|8`, `--min-area`, `--restarts` (random restarts per blob, default 8; see the results below) and `--workers` (default: all CPUs). From Python:
 
 ```python
 from pathlib import Path
 from iceye_homework.blobs import fit_blob_boxes, write_csv
 
-fits = fit_blob_boxes(mask)  # mask: 2D NumPy array; one BlobFit(blob_id, box, area, iou, baseline_iou) per blob
+# mask: 2D NumPy array; one BlobFit(blob_id, box, area, iou, baseline_iou) per blob
+fits = fit_blob_boxes(mask)
 write_csv(fits, Path("blob_bounding_boxes.csv"))
 ```
 
 Output for the example mask:
 
 ```text
-136 blobs in 3.24s -> blob_bounding_boxes.csv
+136 blobs in 2.06s -> blob_bounding_boxes.csv
 IoU mean 0.8305 / median 0.8335  (minAreaRect baseline mean 0.7179, improved on 126 of 136 blobs)
 
 blob_id,center_x,center_y,width,height,angle
@@ -157,23 +160,25 @@ Each blob is fitted independently, in parallel processes, and the result is dete
 1. Seeds. Three starting rectangles: `cv2.minAreaRect` of the pixel centres, the same rectangle grown half a pixel per side to the pixel edges, and a rectangle from the covariance eigenvalues (side = sqrt(12 x eigenvalue), exact for a solid rectangle and not inflated by stray pixels).
 2. Orientation sweep. For angles every 5 degrees (plus the seed angles), the best axis-aligned rectangle in the rotated frame is found on a histogram grid with Dinkelbach's method. Maximising I / (|B| + A - I) reduces to repeatedly finding the maximum-sum subrectangle of the weights (1 + lambda) x count - lambda x cell area.
 3. Refinement. Nelder-Mead on a smooth IoU in which each pixel is weighted by its area overlap with the rectangle.
-4. Exact polish. Pattern search on the exact pixel IoU under the chosen rasterisation, with moves per parameter, per single side and rotations about one end. It starts from the best three candidates, then runs 8 seeded random restarts around the best box. The exact IoU is piecewise constant, so ties are broken by the smooth IoU of the region the fill models paint. This keeps the search moving across flat regions and returns the box in the middle of its plateau, where rounding is least likely to change the painted pixels.
+4. Exact polish. Pattern search on the exact pixel IoU under the chosen rasterisation, with moves per parameter, per single side and rotations about one end. It starts from the best three candidates, then runs 8 seeded random restarts around the best box (`--restarts`). The exact IoU is piecewise constant, so ties are broken by the smooth IoU of the region the fill models paint. This keeps the search moving across flat regions and returns the box in the middle of its plateau, where rounding is least likely to change the painted pixels.
+
+Exact scoring is most of the run time, so candidate boxes are scored in batches on a small window around the blob: one vectorised pixel-centre test, and one `cv2.fillPoly` call per fill model, with each box drawn in its own band of a stacked canvas.
 
 The `minAreaRect` seeds stay among the candidates, so the result is never worse than `cv2.minAreaRect` (up to the 4-decimal rounding; on the example mask it is never worse under any objective).
 
 ### Results
 
-`uv run python scripts/benchmark.py` reproduces these numbers and the figure on an Apple M3 Pro (12 cores). It recomputes every IoU from the CSV boxes with full-image rasterisation and fails if any reported IoU or baseline disagrees.
+`uv run python scripts/benchmark.py` reproduces these numbers and the figure on an Apple M3 Pro (6 performance and 6 efficiency cores; times are the best of three runs). It recomputes every IoU from the CSV boxes with full-image rasterisation and fails if any reported IoU or baseline disagrees.
 
 Example mask (1024x1024, 136 blobs):
 
 | Objective | Mean IoU | Median | Min | `cv2.minAreaRect` | Better than it | 1 process | 12 processes |
 |---|---|---|---|---|---|---|---|
-| `robust` (default) | 0.8305 | 0.8335 | 0.5848 | 0.7179 | 126/136 | 17.8 s | 3.5 s |
-| `center` | 0.9548 | 1.0000 | 0.6923 | 0.7066 | 131/136 | 11.0 s | 2.3 s |
-| `subpixel` | 0.8915 | 0.8881 | 0.6429 | 0.7399 | 123/136 | 10.4 s | 2.2 s |
-| `round` | 0.8909 | 0.8889 | 0.6250 | 0.7395 | 122/136 | 10.0 s | 2.2 s |
-| `truncate` | 0.8910 | 0.8889 | 0.6250 | 0.6855 | 130/136 | 9.2 s | 2.1 s |
+| `robust` (default) | 0.8305 | 0.8335 | 0.5848 | 0.7179 | 126/136 | 8.7 s | 2.0 s |
+| `center` | 0.9548 | 1.0000 | 0.6923 | 0.7066 | 131/136 | 6.6 s | 1.9 s |
+| `subpixel` | 0.8915 | 0.8881 | 0.6429 | 0.7399 | 123/136 | 7.1 s | 1.8 s |
+| `round` | 0.8909 | 0.8889 | 0.6250 | 0.7395 | 122/136 | 7.2 s | 1.9 s |
+| `truncate` | 0.8910 | 0.8889 | 0.6250 | 0.6855 | 130/136 | 7.4 s | 2.1 s |
 
 The other blobs tie with `minAreaRect`; none is worse. The same boxes scored under every rasterisation (mean IoU):
 
@@ -185,6 +190,16 @@ The other blobs tie with `minAreaRect`; none is worse. The same boxes scored und
 | ours, `round` | 0.5333 | 0.8225 | 0.8909 | 0.5991 | 0.5333 |
 | ours, `truncate` | 0.5070 | 0.7651 | 0.7689 | 0.8910 | 0.5070 |
 | `cv2.minAreaRect` | 0.7066 | 0.7399 | 0.7395 | 0.6855 | 0.6855 |
+
+More random restarts keep finding small gains. They never lower a blob's IoU, because each blob's random sequence is fixed and a restart only replaces the incumbent if it scores higher (`robust`, 12 processes):
+
+| `--restarts` | Mean IoU | Blobs better than with 8 | Time |
+|---|---|---|---|
+| 0 | 0.8151 | 0 (74 worse) | 1.2 s |
+| 8 (default) | 0.8305 | - | 2.1 s |
+| 16 | 0.8328 | 27 | 3.0 s |
+| 32 | 0.8348 | 40 | 5.2 s |
+| 64 | 0.8359 | 52 | 9.0 s |
 
 As a correctness check with known answers, 200 random rectangles (2-40 px by 1-12 px, any angle) were painted with each rasterisation and fitted with the matching objective. All 200 came back with IoU 1 under `subpixel`, `round` and `truncate`, and 199 under `center`, where the worst was 0.9933.
 

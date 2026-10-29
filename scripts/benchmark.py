@@ -3,9 +3,10 @@
     uv run python scripts/benchmark.py [--mask data/example_mask.jpg] [--figure docs/blobs_zoom.png]
 
 Prints markdown tables: results on the mask per objective, every objective's boxes scored
-under every raster model next to cv2.minAreaRect, and recovery of synthetic rectangles
-whose ground truth is known. Every IoU is recomputed independently from the box as
-written to the CSV, with ``box_mask`` on the full image.
+under every raster model next to cv2.minAreaRect, IoU against the number of random
+restarts, and recovery of synthetic rectangles whose ground truth is known. Every IoU is
+recomputed independently from the box as written to the CSV, with ``box_mask`` on the
+full image. Times are the best of three runs.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from iceye_homework.blobs import (
     fit_blob_boxes,
     load_mask,
 )
-from iceye_homework.blobs.fit import label_blobs, min_area_rect
+from iceye_homework.blobs.fit import RESTARTS, label_blobs, min_area_rect
 
 CPUS = os.cpu_count() or 1
 
@@ -59,10 +60,14 @@ def min_area_rects(blobs: Sequence[np.ndarray]) -> list[RotatedBox]:
     return boxes
 
 
-def timed(fn: Callable[[], list[BlobFit]]) -> tuple[list[BlobFit], float]:
-    start = time.perf_counter()
-    result = fn()
-    return result, time.perf_counter() - start
+def timed(fn: Callable[[], list[BlobFit]], repeats: int = 3) -> tuple[list[BlobFit], float]:
+    """Result and best-of-``repeats`` wall time; the fits are deterministic."""
+    best = float("inf")
+    for _ in range(repeats):
+        start = time.perf_counter()
+        result = fn()
+        best = min(best, time.perf_counter() - start)
+    return result, best
 
 
 def mask_report(mask: np.ndarray) -> list[BlobFit]:
@@ -106,6 +111,24 @@ def mask_report(mask: np.ndarray) -> list[BlobFit]:
         cells = " | ".join(f"{v:.4f}" for v in means)
         print(f"| {name} | {cells} | {means.mean():.4f} | {means.min():.4f} |")
     return fits_by_objective["robust"]
+
+
+def restarts_report(mask: np.ndarray, counts: Sequence[int] = (0, 8, 16, 32, 64)) -> None:
+    """Mean ``robust`` IoU and run time against the number of random restarts per blob."""
+    runs = {
+        restarts: timed(lambda r=restarts: fit_blob_boxes(mask, workers=CPUS, restarts=r))
+        for restarts in sorted({*counts, RESTARTS})
+    }
+    default = np.array([fit.iou for fit in runs[RESTARTS][0]])
+    print(f"\n## Random restarts per blob (`robust`, {CPUS} processes)\n")
+    print(f"| restarts | mean IoU | better than {RESTARTS} | worse than {RESTARTS} | time |")
+    print("|---|---|---|---|---|")
+    for restarts, (fits, elapsed) in runs.items():
+        ious = np.array([fit.iou for fit in fits])
+        print(
+            f"| {restarts} | {ious.mean():.4f} | {np.count_nonzero(ious > default + 1e-12)} "
+            f"| {np.count_nonzero(ious < default - 1e-12)} | {elapsed:.1f} s |"
+        )
 
 
 def synthetic_report(n: int = 200, seed: int = 7) -> None:
@@ -188,6 +211,7 @@ def main() -> None:
     args = parser.parse_args()
     mask = load_mask(args.mask)
     fits = mask_report(mask)
+    restarts_report(mask)
     synthetic_report()
     zoom_figure(mask, fits, args.figure)
 

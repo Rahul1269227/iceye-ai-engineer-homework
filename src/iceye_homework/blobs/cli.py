@@ -9,9 +9,16 @@ import sys
 import time
 from pathlib import Path
 
-from .fit import fit_blob_boxes
+from .fit import RESTARTS, fit_blob_boxes
 from .geometry import OBJECTIVES
 from .io import load_mask, write_csv, write_overlay
+
+
+def _non_negative(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {value}")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--connectivity", type=int, choices=(4, 8), default=8)
     parser.add_argument("--min-area", type=int, default=1, help="ignore blobs smaller than this")
     parser.add_argument(
+        "--restarts",
+        type=_non_negative,
+        default=RESTARTS,
+        help=f"random restarts of the local search per blob (default: {RESTARTS}); more "
+        "never lowers a blob's IoU, and each one adds about the same time",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=os.cpu_count() or 1,
@@ -63,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         min_area=args.min_area,
         objective=args.objective,
         workers=args.workers,
+        restarts=args.restarts,
     )
     elapsed = time.perf_counter() - start
 

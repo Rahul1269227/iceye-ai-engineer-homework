@@ -14,6 +14,7 @@ from pathlib import Path
 from glinker import processor_registry
 from glinker.l1 import L1Output
 from kreuzberg import ExtractionConfig, OcrConfig, extract_file_sync
+from transformers.initialization import no_init_weights
 
 from .models import EntityStoreFile, StoredEntity
 from .store import clean_surface, normalize
@@ -92,15 +93,18 @@ def detect_mentions(
     """
     if not chunks:
         return []
-    processor = processor_registry.get("l1_gliner")(
-        config_dict={
-            "model": model,
-            "labels": list(labels),
-            "threshold": threshold,
-            "device": device,
-            "use_precomputed_embeddings": True,
-        }
-    )
+    # GLiNER builds its encoders from config and then loads every weight from the
+    # checkpoint, so the random initialisation in between is wasted (most of the load).
+    with no_init_weights():
+        processor = processor_registry.get("l1_gliner")(
+            config_dict={
+                "model": model,
+                "labels": list(labels),
+                "threshold": threshold,
+                "device": device,
+                "use_precomputed_embeddings": True,
+            }
+        )
     output: L1Output = processor(texts=[chunk.text for chunk in chunks])
     return [
         Mention(entity.text, entity.label or "unknown", chunk.start + entity.start,
