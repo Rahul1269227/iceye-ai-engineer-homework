@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
 
-import pydantic_ai
+from kreuzberg import KreuzbergError
 from pydantic_ai.exceptions import AgentRunError, UserError
 
 from .agent import MODEL_ENV, OFFLINE_MODEL, ask
@@ -61,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    pydantic_ai.BANNER_ENABLED = False
+    logging.basicConfig(format="%(message)s")
     match args.command:
         case "extract":
             return _extract(args)
@@ -76,15 +77,19 @@ def _extract(args: argparse.Namespace) -> int:
         print(f"error: {args.document} is not a file", file=sys.stderr)
         return 2
     start = time.perf_counter()
-    data = extract_entities(
-        args.document,
-        labels=args.labels,
-        threshold=args.threshold,
-        model=args.ner_model,
-        ocr_backend=args.ocr_backend,
-        force_ocr=args.force_ocr,
-        device=args.device,
-    )
+    try:
+        data = extract_entities(
+            args.document,
+            labels=args.labels,
+            threshold=args.threshold,
+            model=args.ner_model,
+            ocr_backend=args.ocr_backend,
+            force_ocr=args.force_ocr,
+            device=args.device,
+        )
+    except KreuzbergError as exc:
+        print(f"error: cannot extract text from {args.document}: {exc}", file=sys.stderr)
+        return 2
     write_store(data, args.store)
     mentions = sum(entity.count for entity in data.entities)
     print(

@@ -6,13 +6,17 @@ No LLM is involved: entities are detected here, once, and ``ask`` only reads the
 from __future__ import annotations
 
 import re
+import warnings
 from collections import Counter, defaultdict
 from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from glinker import processor_registry
 from glinker.l1 import L1Output
+from huggingface_hub import constants as hub_constants
 from kreuzberg import ExtractionConfig, OcrConfig, extract_file_sync
 from transformers.initialization import no_init_weights
 
@@ -93,18 +97,13 @@ def detect_mentions(
     """
     if not chunks:
         return []
-    # GLiNER builds its encoders from config and then loads every weight from the
-    # checkpoint, so the random initialisation in between is wasted (most of the load).
-    with no_init_weights():
-        processor = processor_registry.get("l1_gliner")(
-            config_dict={
-                "model": model,
-                "labels": list(labels),
-                "threshold": threshold,
-                "device": device,
-                "use_precomputed_embeddings": True,
-            }
-        )
+    processor = _load_gliner({
+        "model": model,
+        "labels": list(labels),
+        "threshold": threshold,
+        "device": device,
+        "use_precomputed_embeddings": True,
+    })  # fmt: skip
     output: L1Output = processor(texts=[chunk.text for chunk in chunks])
     return [
         Mention(entity.text, entity.label or "unknown", chunk.start + entity.start,
@@ -112,6 +111,35 @@ def detect_mentions(
         for chunk, entities in zip(chunks, output.entities, strict=True)
         for entity in entities
     ]  # fmt: skip
+
+
+def _load_gliner(config: dict[str, Any]) -> Any:
+    """GLinker's GLiNER layer, from the Hugging Face cache if the model and its tokenizers
+    are there (no Hub requests), else from the Hub."""
+    factory = processor_registry.get("l1_gliner")
+    # GLiNER builds its encoders from config and then loads every weight from the
+    # checkpoint, so the random initialisation in between is wasted (most of the load).
+    with no_init_weights(), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "The `resume_download` argument is deprecated")
+        warnings.filterwarnings("ignore", "Resizing embeddings is not supported")
+        if hub_constants.HF_HUB_OFFLINE:
+            return factory(config_dict=config)
+        try:
+            with _hub_offline():
+                return factory(config_dict=config)
+        except OSError:
+            return factory(config_dict=config)
+
+
+@contextmanager
+def _hub_offline() -> Iterator[None]:
+    # GLinker passes no local_files_only, and without it every cached file costs a Hub
+    # round trip (~1.5 s per load); the offline switch is read at call time.
+    hub_constants.HF_HUB_OFFLINE = True
+    try:
+        yield
+    finally:
+        hub_constants.HF_HUB_OFFLINE = False
 
 
 def aggregate(mentions: Sequence[Mention]) -> list[StoredEntity]:

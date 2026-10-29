@@ -425,6 +425,7 @@ source = { editable = "." }
 dependencies = [
     { name = "gliner" },
     { name = "glinker" },
+    { name = "huggingface-hub" },
     { name = "kreuzberg" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
@@ -446,6 +447,7 @@ dev = [
 requires-dist = [
     { name = "gliner", specifier = "==0.2.29" },
     { name = "glinker", specifier = "==0.1.1" },
+    { name = "huggingface-hub", specifier = "==1.33.0" },
     { name = "kreuzberg", specifier = "==4.10.4" },
     { name = "numpy", specifier = "==2.5.4" },
     { name = "opencv-python-headless", specifier = "==5.0.0.93" },
