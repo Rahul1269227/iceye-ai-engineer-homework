@@ -100,7 +100,7 @@ class _Blob:
         grow = sum(_paint_growth(raster) for raster in rasters) / len(rasters)
         return cls(xs - ax, ys - ay, ax, ay, BlobScorer(xs, ys, objective, shape), grow)
 
-    def tie_score(self, params: BoxParams) -> float:
+    def tie_score(self, params: BoxParams | np.ndarray) -> float:
         """Smooth IoU of the region the raster models paint, for breaking exact-IoU ties."""
         cx, cy, w, h, angle = params
         g = self.tie_grow
@@ -142,11 +142,21 @@ def _paint_growth(raster: Raster) -> float:
 
 
 def label_blobs(mask: np.ndarray, connectivity: int = 8) -> tuple[int, np.ndarray, np.ndarray]:
-    """Connected components of a boolean mask: ``(count, labels, stats)`` as in OpenCV."""
+    """Connected components of a boolean mask: ``(count, labels, stats)`` as in OpenCV, but
+    numbered 1..count in raster order of each blob's first pixel, like ``scipy.ndimage.label``.
+    """
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8), connectivity=connectivity
     )
-    return count - 1, labels, stats
+    # OpenCV's labelling scans two rows at a time, so its numbering is not raster order.
+    first = np.full(count, labels.size)
+    found, index = np.unique(labels, return_index=True)
+    first[found] = index
+    first[0] = -1  # the background stays label 0
+    order = np.argsort(first, kind="stable")
+    relabel = np.empty(count, dtype=labels.dtype)
+    relabel[order] = np.arange(count, dtype=labels.dtype)
+    return count - 1, relabel[labels], stats[order]
 
 
 def fit_blob_boxes(
@@ -356,7 +366,7 @@ def _max_sum_subrect(weights: np.ndarray) -> tuple[int, int, int, int]:
     return int(top), int(bottom), start, int(end)
 
 
-def _soft_iou_params(params: np.ndarray, dx: np.ndarray, dy: np.ndarray) -> float:
+def _soft_iou_params(params: BoxParams | np.ndarray, dx: np.ndarray, dy: np.ndarray) -> float:
     """IoU with each pixel weighted by its (separable) area overlap with the rectangle."""
     cx, cy, w, h, angle = params
     w, h = abs(w), abs(h)

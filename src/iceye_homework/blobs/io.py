@@ -18,7 +18,8 @@ def load_mask(path: Path, threshold: int = 127) -> np.ndarray:
     """Load a binary mask as a 2D boolean array.
 
     ``.npy`` files are read as-is (non-zero is foreground). Images are read as grayscale
-    and thresholded (``> threshold``), which also removes JPEG compression noise.
+    and thresholded (``> threshold``), which suppresses most JPEG compression noise; an
+    image whose values are all 0 or 1 is a 0/1 mask, and non-zero is foreground.
     """
     if path.suffix.lower() == ".npy":
         array = np.load(path)
@@ -28,6 +29,8 @@ def load_mask(path: Path, threshold: int = 127) -> np.ndarray:
     image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise ValueError(f"{path}: not a readable image")
+    if image.max() <= 1:
+        return image != 0
     return image > threshold
 
 

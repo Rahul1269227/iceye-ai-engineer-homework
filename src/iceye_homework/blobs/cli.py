@@ -69,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if not mask.any():
+        print(f"warning: {args.mask} has no foreground pixels", file=sys.stderr)
 
     start = time.perf_counter()
     fits = fit_blob_boxes(

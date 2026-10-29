@@ -8,8 +8,7 @@ dist/
 build/
 .DS_Store
 
-# generated outputs
-/blob_bounding_boxes.csv
+# generated outputs (blob_bounding_boxes.csv is kept: the result for data/example_mask.jpg)
 /entities.json
 /overlay.png
 *.zip
