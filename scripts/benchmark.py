@@ -1,6 +1,6 @@
 """Reproduce the Part 2 numbers and the figure quoted in the README.
 
-    uv run python scripts/benchmark.py [--mask data/example_mask.jpg] [--figure docs/blobs_zoom.png]
+    uv run python scripts/benchmark.py [--mask data/example_mask.png] [--figure docs/blobs_zoom.png]
 
 Prints markdown tables: results on the mask per objective, every objective's boxes scored
 under every raster model next to cv2.minAreaRect, IoU against the number of random
@@ -207,7 +207,7 @@ def zoom_figure(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--mask", type=Path, default=Path("data/example_mask.jpg"))
+    parser.add_argument("--mask", type=Path, default=Path("data/example_mask.png"))
     parser.add_argument("--figure", type=Path, default=Path("docs/blobs_zoom.png"))
     args = parser.parse_args()
     mask = load_mask(args.mask)

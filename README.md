@@ -27,7 +27,7 @@ uv run ner-chat extract data/sample_report.pdf
 uv run ner-chat ask "How many times is Kestrel Orbital mentioned, and is NASA?" --model offline
 
 # Part 2: writes blob_bounding_boxes.csv
-uv run blob-boxes data/example_mask.jpg
+uv run blob-boxes data/example_mask.png
 
 # Tests (offline, no API key)
 uv run pytest
@@ -113,16 +113,16 @@ These checks are heuristics on free text. They catch wrong or invented counts an
 
 ## Part 2: blob bounding boxes
 
-IoU here is between pixel sets, as the brief describes it: the blob's pixels against "that mask defined by the rectangle itself (filled rectangle essentially)". The brief does not say how a rectangle is filled into pixels, so the fit supports four rasterisations and by default does well under all of them (see [Which mask does a rectangle define?](#which-mask-does-a-rectangle-define)). Treating the rectangle as a continuous polygon and each pixel as a unit square, as Shapely-style polygon IoU does, is a different metric with different optima. Under it, the default boxes, which are fitted to painted pixels, average 0.5830 against 0.5935 for `cv2.minAreaRect`, while the `--objective center` boxes average 0.7557.
+IoU here is between pixel sets, as the brief describes it: the blob's pixels against "that mask defined by the rectangle itself (filled rectangle essentially)". The brief does not say how a rectangle is filled into pixels, so the fit supports four rasterisations and by default does well under all of them (see [Which mask does a rectangle define?](#which-mask-does-a-rectangle-define)). Treating the rectangle as a continuous polygon and each pixel as a unit square, as Shapely-style polygon IoU does, is a different metric with different optima, and this tool does not optimise it. On the example mask, `cv2.minAreaRect` does best under it (mean 0.8652). The `--objective center` boxes average 0.8273, and the default boxes, which are fitted to painted pixels, average 0.7507.
 
 ### Usage
 
 ```bash
-uv run blob-boxes data/example_mask.jpg                        # -> blob_bounding_boxes.csv
+uv run blob-boxes data/example_mask.png                        # -> blob_bounding_boxes.csv
 uv run blob-boxes mask.npy --out boxes.csv --overlay overlay.png
 ```
 
-The mask can be a `.npy` 2D array (non-zero is foreground) or an image. An image whose values are all 0 or 1 is read as a 0/1 mask. Otherwise foreground is a grey value above `--threshold` (default 127), which suppresses most JPEG compression noise; a few stray pixels survive as tiny blobs. A mask with no foreground gives a CSV with only the header, plus a warning. Other options: `--objective` (see below), `--connectivity 4|8`, `--min-area`, `--restarts` (random restarts per blob, default 8; see the results below) and `--workers` (default: all CPUs). From Python:
+The mask can be a `.npy` 2D array (non-zero is foreground) or an image. An image whose values are all 0 or 1 is read as a 0/1 mask. Otherwise foreground is a grey value above `--threshold` (default 127), which suppresses most JPEG compression noise, though a few stray pixels can survive as tiny blobs. A mask with no foreground gives a CSV with only the header, plus a warning. Other options: `--objective` (see below), `--connectivity 4|8`, `--min-area`, `--restarts` (random restarts per blob, default 8; see the results below) and `--workers` (default: all CPUs). From Python:
 
 ```python
 from pathlib import Path
@@ -136,27 +136,29 @@ write_csv(fits, Path("blob_bounding_boxes.csv"))
 Output for the example mask (the CSV is included as `blob_bounding_boxes.csv`):
 
 ```text
-136 blobs in 2.06s -> blob_bounding_boxes.csv
-IoU mean 0.8305 / median 0.8335  (minAreaRect baseline mean 0.7179, improved on 126 of 136 blobs)
+147 blobs in 2.55s -> blob_bounding_boxes.csv
+IoU mean 0.8722 / median 0.8757  (minAreaRect baseline mean 0.7829, improved on 146 of 147 blobs)
 
 blob_id,center_x,center_y,width,height,angle
-1,365.5625,256.0625,2.125,1.125,-90.0
-2,507.5723,435.2879,1.4841,1.0592,24.104
+1,732.2641,512.1355,5.6147,2.5173,50.8467
+2,1015.7309,871.0608,3.6671,1.7388,56.8534
 ...
 ```
 
 The coordinates follow OpenCV's `RotatedRect`. `x` is the column and `y` the row, and pixel centres sit at integer coordinates. `width >= height`, the angle is in degrees in [-90, 90), and the width side points along (cos angle, sin angle) with y pointing down. `cv2.boxPoints(((center_x, center_y), (width, height), angle))` gives the corners. Blob ids are 1..N in raster order of each blob's first pixel, the same numbering as `scipy.ndimage.label` (OpenCV's labels are renumbered to match). Values are rounded to 4 decimals, and the reported IoU is computed on the rounded boxes, so it can be reproduced from the CSV.
 
-Four boxes in the example have height 0, a segment. Blobs 86 and 89 are straight lines of pixel centres, which every rasterisation paints as exactly the blob (IoU 1), and `cv2.minAreaRect` gives the same segment. Blobs 22 and 85 have 7 and 4 pixels and are two pixels wide in places; a segment still scores best for them under the default objective (IoU 0.7143 and 0.75). A single-pixel blob gets a 0 x 0 box. Such boxes have no area, so a metric that measures the rectangle as a polygon scores them 0, and under `center` they cover only the pixel centres exactly on them.
+On the example mask every blob has at least 11 pixels, and no box is degenerate. On other masks, a blob that is a straight line of pixel centres gets a box of height 0, a segment. Every rasterisation paints that segment as exactly the blob (IoU 1), and `cv2.minAreaRect` returns the same segment. A single pixel gets a 0 x 0 box, and a tiny blob that is not quite a line can also get a segment when that scores best. Such boxes have no area, so a metric that measures the rectangle as a polygon scores them 0, and under `center` they cover only the pixel centres exactly on them.
 
 ### Which mask does a rectangle define?
 
-The task asks for the IoU between the blob and "the mask defined by the rectangle", but does not say how a rectangle becomes pixels. That matters here: the median blob in the example has 12.5 pixels, and on blobs that small half a pixel per side changes IoU a lot. `blob-boxes` supports four exact rasterisations:
+The task asks for the IoU between the blob and "the mask defined by the rectangle", but does not say how a rectangle becomes pixels. That matters here: the median blob in the example has 48 pixels, about 7 x 7, and on blobs that small half a pixel per side changes IoU a lot. `blob-boxes` supports four exact rasterisations:
 
 - `center`: pixels whose centre lies inside the closed rectangle (the point-sampling rule of GDAL/rasterio and scikit-image).
 - `subpixel`: `cv2.fillPoly` of the `cv2.boxPoints` polygon at 1/16-pixel precision.
 - `round`: `cv2.fillPoly` of the corners rounded to integers.
 - `truncate`: `cv2.fillPoly` of the corners truncated to integers, which is what `np.intp(box)` or `box.astype(int)` in the OpenCV tutorials does.
+
+All four paint onto the image grid, so the part of a box that overhangs the image edge paints no pixels and does not count against it.
 
 `cv2.fillPoly` paints every pixel the outline touches, so the three fill models paint about half a pixel more per side than `center`. A box tuned for one model does badly under the others (second table below). The default objective, `robust`, maximises the mean IoU over all four. It gives up some IoU under each single model, but on the example mask its mean IoU stays above `cv2.minAreaRect`'s under every one of them, which no single-model objective manages. If you know which rasterisation will be used, pass it with `--objective`.
 
@@ -177,42 +179,42 @@ The `minAreaRect` seeds stay among the candidates, so before rounding the result
 
 `uv run python scripts/benchmark.py` reproduces these numbers and the figure on an Apple M3 Pro (6 performance and 6 efficiency cores; times are the best of three runs). It recomputes every IoU from the CSV boxes with full-image rasterisation and fails if any reported IoU or baseline disagrees.
 
-Example mask (1024x1024, 136 blobs):
+Example mask (2048x2048, 147 blobs):
 
 | Objective | Mean IoU | Median | Min | `cv2.minAreaRect` | Better than it | 1 process | 12 processes |
 |---|---|---|---|---|---|---|---|
-| `robust` (default) | 0.8305 | 0.8335 | 0.5848 | 0.7179 | 126/136 | 8.7 s | 2.0 s |
-| `center` | 0.9548 | 1.0000 | 0.6923 | 0.7066 | 131/136 | 6.6 s | 1.9 s |
-| `subpixel` | 0.8915 | 0.8881 | 0.6429 | 0.7399 | 123/136 | 7.1 s | 1.8 s |
-| `round` | 0.8909 | 0.8889 | 0.6250 | 0.7395 | 122/136 | 7.2 s | 1.9 s |
-| `truncate` | 0.8910 | 0.8889 | 0.6250 | 0.6855 | 130/136 | 7.4 s | 2.1 s |
+| `robust` (default) | 0.8722 | 0.8757 | 0.8006 | 0.7829 | 146/147 | 10.3 s | 2.4 s |
+| `center` | 0.9542 | 0.9565 | 0.8258 | 0.8328 | 147/147 | 7.1 s | 1.8 s |
+| `subpixel` | 0.9040 | 0.9048 | 0.8113 | 0.7761 | 144/147 | 7.3 s | 1.9 s |
+| `round` | 0.9035 | 0.9048 | 0.8113 | 0.7737 | 144/147 | 7.4 s | 2.2 s |
+| `truncate` | 0.9036 | 0.9040 | 0.8113 | 0.7490 | 144/147 | 7.4 s | 2.0 s |
 
 The other blobs tie with `minAreaRect`; none is worse. The same boxes scored under every rasterisation (mean IoU):
 
 | Boxes | `center` | `subpixel` | `round` | `truncate` | Worst |
 |---|---|---|---|---|---|
-| ours, `robust` | 0.8349 | 0.8667 | 0.8680 | 0.7521 | 0.7521 |
-| ours, `center` | 0.9548 | 0.5766 | 0.5706 | 0.5550 | 0.5550 |
-| ours, `subpixel` | 0.5184 | 0.8915 | 0.8358 | 0.6116 | 0.5184 |
-| ours, `round` | 0.5333 | 0.8225 | 0.8909 | 0.5991 | 0.5333 |
-| ours, `truncate` | 0.5070 | 0.7651 | 0.7689 | 0.8910 | 0.5070 |
-| `cv2.minAreaRect` | 0.7066 | 0.7399 | 0.7395 | 0.6855 | 0.6855 |
+| ours, `robust` | 0.8590 | 0.8884 | 0.8883 | 0.8531 | 0.8531 |
+| ours, `center` | 0.9542 | 0.7431 | 0.7437 | 0.6939 | 0.6939 |
+| ours, `subpixel` | 0.7071 | 0.9040 | 0.8787 | 0.7368 | 0.7071 |
+| ours, `round` | 0.7032 | 0.8737 | 0.9035 | 0.7343 | 0.7032 |
+| ours, `truncate` | 0.6965 | 0.8347 | 0.8391 | 0.9036 | 0.6965 |
+| `cv2.minAreaRect` | 0.8328 | 0.7761 | 0.7737 | 0.7490 | 0.7490 |
 
 More random restarts keep finding small gains. They never lower a blob's IoU, because each blob's random sequence is fixed and a restart only replaces the incumbent if it scores higher (`robust`, 12 processes):
 
 | `--restarts` | Mean IoU | Blobs better than with 8 | Time |
 |---|---|---|---|
-| 0 | 0.8151 | 0 (74 worse) | 1.2 s |
-| 8 (default) | 0.8305 | - | 2.1 s |
-| 16 | 0.8328 | 27 | 3.0 s |
-| 32 | 0.8348 | 40 | 5.2 s |
-| 64 | 0.8359 | 52 | 9.0 s |
+| 0 | 0.8682 | 0 (71 worse) | 1.3 s |
+| 8 (default) | 0.8722 | - | 2.5 s |
+| 16 | 0.8734 | 35 | 3.8 s |
+| 32 | 0.8739 | 52 | 6.5 s |
+| 64 | 0.8745 | 67 | 11.1 s |
 
 As a correctness check with known answers, 200 random rectangles (2-40 px by 1-12 px, any angle) were painted with each rasterisation and fitted with the matching objective. All 200 came back with IoU 1 under `subpixel`, `round` and `truncate`, and 199 under `center`, where the worst was 0.9933.
 
 ![Our boxes (green, robust objective) and cv2.minAreaRect (red) on part of the example mask, 8x zoom](docs/blobs_zoom.png)
 
-The figure shows the window of the example mask where the fit gains most. On the long blob, `cv2.minAreaRect` has to cover a few stray pixels and becomes much wider than the blob; the IoU-optimal box leaves them out.
+The figure shows the window of the example mask where the fit gains most. The long blob tapers at both ends, so `cv2.minAreaRect` has to enclose the tapered corners and comes out wider than the blob; the IoU-optimal box trims them.
 
 ## Tests
 
@@ -233,10 +235,10 @@ src/iceye_homework/
                   agent.py (tools, grounding validator), offline.py, cli.py
   blobs/          Part 2: fit.py (search), geometry.py (rasterisation, exact IoU), io.py, cli.py
 tests/            entities.json fixture, one test per part
-data/             example_mask.jpg (from the brief), sample_report.pdf, sample_scan.png
+data/             example_mask.png (from the brief), sample_report.pdf, sample_scan.png
 scripts/          benchmark.py (Part 2 numbers and figure), make_samples.py (sample documents)
 docs/             blobs_zoom.png
-blob_bounding_boxes.csv   Part 2 result for data/example_mask.jpg
+blob_bounding_boxes.csv   Part 2 result for data/example_mask.png
 ```
 
 `data/sample_report.pdf` is a fictional one-page report with a text layer, and `data/sample_scan.png` is the same page rasterised at 150 dpi, slightly rotated and blurred, to exercise OCR. `uv run scripts/make_samples.py` regenerates both; its dependencies, including PyMuPDF, are declared inline (PEP 723) so they stay out of the project. Code style is checked with `uv run ruff check` and `uv run ruff format --check`.
