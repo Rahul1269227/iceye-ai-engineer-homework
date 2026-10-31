@@ -6,7 +6,6 @@ import pytest
 from iceye_homework.blobs import RotatedBox, box_mask, fit_blob, fit_blob_boxes
 from iceye_homework.blobs.fit import label_blobs, min_area_rect
 
-
 SHAPE = (100, 140)
 
 
@@ -59,9 +58,7 @@ def test_recovers_rotated_rectangles():
         assert (fit.box.center_x, fit.box.center_y) == pytest.approx(
             (rect.center_x, rect.center_y), abs=0.6
         )
-        assert (fit.box.width, fit.box.height) == pytest.approx(
-            (rect.width, rect.height), abs=1.0
-        )
+        assert (fit.box.width, fit.box.height) == pytest.approx((rect.width, rect.height), abs=1.0)
         assert fit.box.angle == pytest.approx(rect.angle, abs=1.5)
 
 

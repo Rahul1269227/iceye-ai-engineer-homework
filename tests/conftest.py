@@ -1,15 +1,8 @@
-import sys
 from pathlib import Path
 
 import pytest
 
-ICEYE_ROOT = Path("/Users/rahuly@backbase.com/Documents/iceye")
-sys.path.insert(0, str(ICEYE_ROOT / "src"))
-
-
-@pytest.fixture
-def iceye_root() -> Path:
-    return ICEYE_ROOT
+from iceye_homework.ner import EntityStore
 
 
 @pytest.fixture
@@ -18,7 +11,5 @@ def store_path() -> Path:
 
 
 @pytest.fixture
-def store(store_path):
-    from iceye_homework.ner import EntityStore
-
+def store(store_path) -> EntityStore:
     return EntityStore.load(store_path)

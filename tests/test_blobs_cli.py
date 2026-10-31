@@ -78,9 +78,22 @@ def test_cli_min_area(tmp_path):
     mask[20:30, 20:30] = True
     mask_path = _mask_png(tmp_path, mask)
     out = tmp_path / "boxes.csv"
-    assert main(
-        [str(mask_path), "--out", str(out), "--min-area", "5", "--workers", "1", "--restarts", "0"]
-    ) == 0
+    assert (
+        main(
+            [
+                str(mask_path),
+                "--out",
+                str(out),
+                "--min-area",
+                "5",
+                "--workers",
+                "1",
+                "--restarts",
+                "0",
+            ]
+        )
+        == 0
+    )
     with out.open(newline="") as handle:
         rows = list(csv.reader(handle))
     assert len(rows) == 2

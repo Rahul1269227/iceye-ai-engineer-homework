@@ -25,6 +25,16 @@ def test_ask_json(store_path, monkeypatch, capsys):
     assert any(m.name == "ICEYE" and m.mention_count == 7 for m in answer.entities)
 
 
+def test_ask_test_model_json(store_path, monkeypatch, capsys):
+    monkeypatch.setattr(models, "ALLOW_MODEL_REQUESTS", False)
+    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NER_CHAT_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+
+    argv = ["ask", "Is NASA mentioned?", "--store", str(store_path), "--model", "test", "--json"]
+    assert main(argv) == 0
+    Answer.model_validate_json(capsys.readouterr().out)
+
+
 def test_ask_human_format(store_path, monkeypatch, capsys):
     monkeypatch.setattr(models, "ALLOW_MODEL_REQUESTS", False)
     argv = ["ask", "Is SAR mentioned?", "--store", str(store_path), "--model", "offline"]

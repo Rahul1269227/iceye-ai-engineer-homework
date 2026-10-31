@@ -222,10 +222,10 @@ The figure shows the window of the example mask where the fit gains most. The lo
 uv run pytest
 ```
 
-There is one test per part, and both run offline with no API key in about 5 seconds.
+All tests run offline with no API key (about 5 seconds). Coverage is split by module:
 
-- `tests/test_part1_ask.py` runs the `ask` path against the fixture store `tests/entities.json` with Pydantic AI's `TestModel` and real model requests disabled. The model cites a known entity by its alias, with the wrong label and count, and an absent name. The test checks that the answer reports the store's name, label and count for the known entity and 0 / not in the store for the absent one, that `count_mentions` was called, and that no store entity name appears in the instructions sent to the model. It also runs the CLI with `--model test --json` and checks that the output parses as an `Answer`.
-- `tests/test_part2_blobs.py` paints three rotated rectangles with `cv2.fillPoly` and checks that they are recovered with IoU 1 and close to their true parameters. It adds a square with a one-pixel spur, where the fit must beat `cv2.minAreaRect` clearly, and checks the CLI's CSV header, row count and angle range.
+- Part 1: `test_store.py`, `test_ask.py`, `test_offline.py`, `test_ner_cli.py`, `test_extract.py` (chunking and aggregation only; no GLiNER download). `test_ask.py` uses Pydantic AI's `TestModel` against `tests/entities.json`: the model cites a known entity by alias with the wrong label/count plus an absent name, and the answer is rewritten to the store's record. It also checks that `count_mentions` was used and that entity names never appear in the model instructions. CLI `ask --json` is covered with `--model offline` and `--model test`.
+- Part 2: `test_geometry.py`, `test_fit.py`, `test_io.py`, `test_blobs_cli.py`. Fits recover painted rotated rectangles at IoU 1, beat `cv2.minAreaRect` on a spur, and check CSV header/angles through the CLI.
 
 ## Repository layout
 
@@ -234,7 +234,7 @@ src/iceye_homework/
   ner/            Part 1: extract.py (Kreuzberg + GLinker), store.py, models.py,
                   agent.py (tools, grounding validator), offline.py, cli.py
   blobs/          Part 2: fit.py (search), geometry.py (rasterisation, exact IoU), io.py, cli.py
-tests/            entities.json fixture, one test per part
+tests/            entities.json fixture and module tests for both parts
 data/             example_mask.png (from the brief), sample_report.pdf, sample_scan.png
 scripts/          benchmark.py (Part 2 numbers and figure), make_samples.py (sample documents)
 docs/             blobs_zoom.png
@@ -250,11 +250,11 @@ blob_bounding_boxes.csv   Part 2 result for data/example_mask.png
 | uv + `pyproject.toml`, `uv sync` only, no `requirements.txt` | `pyproject.toml`, `uv.lock` |
 | Python 3.12 or 3.13 | `requires-python = "==3.12.*"`, `.python-version` |
 | Every dependency pinned exactly | `==` pins in `pyproject.toml`, including dev tools and the build backend |
-| `/tests` with one unit test per task | `tests/test_part1_ask.py`, `tests/test_part2_blobs.py` |
+| `/tests` with unit tests per task | `tests/test_ask.py`, `tests/test_fit.py`, and the other `tests/test_*.py` modules |
 | Part 1: Kreuzberg, then GLinker, then a local store; no single-call detect-and-answer | `ner/extract.py`, `ner-chat extract` |
 | Part 1: `ask` reads only the store, through tools, without the inventory in the prompt | `ner/agent.py` (four capped tools, instructions without entities) |
 | Part 1: structured reply with the entities used (name, label, count); absent name gives 0 | `Answer` in `ner/models.py`, `ground_answer` in `ner/agent.py` |
-| Part 1: fixture test with `--model test` / `TestModel`, known and absent names, no key | `tests/entities.json`, `tests/test_part1_ask.py` |
+| Part 1: fixture test with `--model test` / `TestModel`, known and absent names, no key | `tests/entities.json`, `tests/test_ask.py` |
 | Part 2: blobs in a 2D NumPy mask, IoU-maximising rotated rectangle per blob | `blobs/fit.py`, `fit_blob_boxes` |
 | Part 2: `blob_bounding_boxes.csv` with `blob_id, center_x, center_y, width, height, angle` | `blobs/io.py`, `blob-boxes` |
 | README with install, run and test instructions | this file |

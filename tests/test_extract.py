@@ -8,8 +8,6 @@ def test_chunk_text_keeps_offsets():
     chunks = chunk_text(text, max_words=20)
     assert chunks
     assert chunks[0].start == 0
-    rebuilt = "".join(c.text for c in chunks)
-    # chunks are contiguous slices; joins may drop inter-chunk gaps only when empty
     for chunk in chunks:
         assert text[chunk.start : chunk.start + len(chunk.text)] == chunk.text
 
