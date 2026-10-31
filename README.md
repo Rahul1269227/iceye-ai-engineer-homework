@@ -1,5 +1,7 @@
 # ICEYE AI Engineer homework
 
+GitHub: https://github.com/Rahul1269227/iceye-ai-engineer-homework
+
 This repository contains both parts of the homework as one uv project with two command-line tools:
 
 - `ner-chat` (Part 1) extracts named entities from a document into a JSON store with Kreuzberg and GLinker, then answers one question at a time from that store with a Pydantic AI agent.
